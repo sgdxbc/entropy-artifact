@@ -10,7 +10,6 @@ use actix_web::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tracing::instrument;
 
 struct StateInner {
     participants: Mutex<Vec<(SystemTime, Value)>>,
@@ -23,7 +22,7 @@ struct StateInner {
 pub struct State(Data<StateInner>);
 
 #[post("/join")]
-#[instrument(skip(data, participant))]
+// #[instrument(skip(data, participant))]
 async fn join(data: Data<StateInner>, participant: Json<Value>) -> HttpResponse {
     let mut participants = data.participants.lock().unwrap();
     let participant_id = participants.len();
