@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use actix_web::{http::StatusCode, App, HttpServer};
+use actix_web_opentelemetry::ClientExt;
 use anyhow::anyhow;
 use awc::Client;
 use clap::Parser;
@@ -43,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
         let state = meeting_point::State::new(expect_number, serde_json::to_value(()).unwrap());
         HttpServer::new(move || {
             App::new()
-                .wrap(tracing_actix_web::TracingLogger::default())
+                .wrap(actix_web_opentelemetry::RequestTracing::new())
                 .configure(|c| state.config(c))
         })
         .bind(("127.0.0.1", 8080))?
@@ -65,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
     let client = Client::new();
     let response = client
         .post("http://localhost:8080/join")
+        .trace_request()
         .send_json(&participant)
         .await
         .map_err(|_| anyhow!("send request error"))?;
@@ -75,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
         sleep(retry_interval).await;
         let response = client
             .get("http://localhost:8080/run")
+            .trace_request()
             .send()
             .await
             .map_err(|_| anyhow!("send request_error"))?

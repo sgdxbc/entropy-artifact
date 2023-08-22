@@ -8,13 +8,12 @@ default-run = "simple-entropy"
 
 [dependencies]
 actix-web = "4.3.1"
-actix-web-opentelemetry = "0.15.0"
+actix-web-opentelemetry = { version = "0.15.0", features = ["awc"] }
 anyhow = "1.0.75"
 awc = "3.1.1"
 clap = { version = "4.3.23", features = ["derive"] }
 ed25519-dalek = { version = "2.0.0", features = ["serde", "rand_core"] }
 opentelemetry = { version = "0.20.0", features = ["rt-tokio"] }
-opentelemetry-stdout = { version = "0.1.0", features = ["trace"] }
 opentelemetry-zipkin = { version = "0.18.0", features = ["reqwest-client"], default-features = false }
 rand = "0.8.5"
 serde = { version = "1.0.185", features = ["derive"] }
@@ -22,6 +21,5 @@ serde_json = "1.0.105"
 sha2 = "0.10.7"
 tokio = { version = "1.32.0", features = ["full"] }
 tracing = "0.1.37"
-tracing-actix-web = "0.7.6"
 tracing-opentelemetry = "0.20.0"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter", "json"] }
