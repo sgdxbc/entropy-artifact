@@ -1,5 +1,7 @@
 use std::{
+    error::Error,
     ffi::{c_int, c_uint, c_void},
+    fmt::Display,
     marker::{PhantomData, PhantomPinned},
     ptr::null_mut,
     sync::{Arc, Once},
@@ -38,6 +40,19 @@ impl WirehairResult {
         }
     }
 }
+
+impl Display for WirehairResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success => write!(f, "Success"),
+            Self::NeedMore => write!(f, "NeedMore"),
+            Self::InvalidInput => write!(f, "InvalidInput"),
+            _ => write!(f, "Other({})", *self as u32),
+        }
+    }
+}
+
+impl Error for WirehairResult {}
 
 extern "C" {
     pub fn wirehair_init_(expected_version: c_int) -> WirehairResult;

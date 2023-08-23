@@ -20,6 +20,7 @@ use crate::peer::Store;
 mod common;
 mod meeting_point;
 mod peer;
+mod chunk;
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Participant {
