@@ -9,6 +9,7 @@ use anyhow::{anyhow, bail};
 use awc::Client;
 use clap::Parser;
 use ed25519_dalek::SigningKey;
+use meeting_point::Run;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -37,7 +38,7 @@ struct Cli {
     meeting_point: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Shared {
     fragment_size: usize,
     inner_k: u32,
@@ -60,16 +61,15 @@ async fn main() -> anyhow::Result<()> {
     if let Some(expect_number) = cli.serve_meeting_point {
         common::setup_tracing("entropy.meeting-point");
 
-        let (state_handle, configure) = meeting_point::State::spawn(
+        let (state_handle, configure) = meeting_point::State::spawn::<Participant>(
             expect_number,
-            serde_json::to_value(Shared {
+            Shared {
                 fragment_size: 1024,
                 inner_k: 32,
                 inner_n: 80,
                 outer_k: 8,
                 outer_n: 10,
-            })
-            .unwrap(),
+            },
         );
         HttpServer::new(move || {
             App::new()
@@ -144,7 +144,7 @@ async fn join_network(peer: &Peer, cli: &Cli) -> anyhow::Result<ReadyRun> {
     let mut retry_interval = Duration::ZERO;
     let run = loop {
         sleep(retry_interval).await;
-        let run = client
+        match client
             .get(format!(
                 "http://{}:8080/run",
                 cli.meeting_point.as_ref().unwrap()
@@ -154,20 +154,26 @@ async fn join_network(peer: &Peer, cli: &Cli) -> anyhow::Result<ReadyRun> {
             .await
             .map_err(|_| anyhow!("send request_error"))?
             .json::<meeting_point::Run<Participant, Shared>>()
-            .await?;
-        if run.ready {
-            break run;
+            .await?
+        {
+            Run::Retry(interval) => retry_interval = interval,
+            Run::Ready {
+                participants,
+                assemble_time,
+                shared,
+            } => {
+                break ReadyRun {
+                    participants,
+                    assemble_time,
+                    shared,
+                    join_id,
+                }
+            }
         }
-        retry_interval = run.retry_interval.unwrap();
     };
     // println!("{response:?}");
 
-    Ok(ReadyRun {
-        participants: run.participants.unwrap(),
-        assemble_time: run.assemble_time.unwrap(),
-        shared: run.shared.unwrap(),
-        join_id,
-    })
+    Ok(run)
 }
 
 async fn leave_network(cli: &Cli, join_id: u32) -> anyhow::Result<()> {

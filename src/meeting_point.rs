@@ -9,8 +9,8 @@ use actix_web::{
     HttpResponse,
 };
 use anyhow::anyhow;
-use serde::Deserialize;
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, to_value, Value};
 use tokio::{
     spawn,
     sync::{mpsc, oneshot},
@@ -19,13 +19,13 @@ use tokio::{
 
 use crate::common::HandlerResult;
 
-pub struct State {
+pub struct State<S> {
     participants: HashMap<u32, Value>,
     participant_id: u32,
     activities: BTreeMap<SystemTime, Activity>,
     ready_number: usize,
     assemble_time: Option<SystemTime>,
-    shared: Value,
+    shared: S,
 }
 
 enum Activity {
@@ -57,13 +57,14 @@ async fn leave(data: Data<AppState>, id: Path<u32>) -> HandlerResult<HttpRespons
     Ok(HttpResponse::Ok().finish())
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Run<P, S> {
-    pub ready: bool,
-    pub retry_interval: Option<Duration>,
-    pub participants: Option<Vec<P>>,
-    pub assemble_time: Option<SystemTime>,
-    pub shared: Option<S>,
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Run<P, S> {
+    Retry(Duration),
+    Ready {
+        participants: Vec<P>,
+        assemble_time: SystemTime,
+        shared: S,
+    },
 }
 
 #[get("/run")]
@@ -73,8 +74,8 @@ async fn run_status(data: Data<AppState>) -> HandlerResult<HttpResponse> {
     Ok(HttpResponse::Ok().json(run.1.await?))
 }
 
-impl State {
-    fn new(expect_number: usize, shared: Value) -> Self {
+impl<S> State<S> {
+    fn new(expect_number: usize, shared: S) -> Self {
         Self {
             participants: Default::default(),
             participant_id: Default::default(),
@@ -85,17 +86,21 @@ impl State {
         }
     }
 
-    pub fn spawn(
+    pub fn spawn<P>(
         expect_number: usize,
-        shared: Value,
+        shared: S,
     ) -> (
         JoinHandle<anyhow::Result<Self>>,
         impl FnOnce(&mut ServiceConfig) + Clone,
-    ) {
+    )
+    where
+        S: Send + Serialize + Clone + 'static,
+        P: Serialize,
+    {
         let mut state = Self::new(expect_number, shared);
         let command = mpsc::unbounded_channel();
         let handle = spawn(async move {
-            state.run(command.1).await?;
+            state.run::<P>(command.1).await?;
             Ok(state)
         });
         (handle, |config| Self::config(config, command.0))
@@ -109,10 +114,14 @@ impl State {
             .service(run_status);
     }
 
-    async fn run(
+    async fn run<P>(
         &mut self,
         mut command: mpsc::UnboundedReceiver<AppCommand>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<()>
+    where
+        S: Serialize + Clone,
+        P: Serialize,
+    {
         while let Some(command) = command.recv().await {
             match command {
                 AppCommand::Join(participant, result) => {
@@ -133,18 +142,19 @@ impl State {
                 }
                 AppCommand::RunStatus(result) => {
                     let response = if self.participants.len() < self.ready_number {
-                        json!({
-                            "ready": false,
-                            "retry_interval": Duration::from_millis(self.ready_number as u64 / 100 / 1000).max(Duration::from_secs(1))
-                        })
+                        to_value(Run::<P, S>::Retry(
+                            Duration::from_millis(self.ready_number as u64 / 100 / 1000)
+                                .max(Duration::from_secs(1)),
+                        ))
+                        .unwrap()
                     } else {
                         let assemble_time = *self.assemble_time.get_or_insert_with(SystemTime::now);
-                        json!({
-                            "ready": true,
-                            "participants": Vec::from_iter(self.participants.values()),
-                            "assemble_time": assemble_time,
-                            "shared": self.shared
+                        to_value(Run::Ready {
+                            participants: Vec::from_iter(self.participants.values()),
+                            assemble_time,
+                            shared: self.shared.clone(),
                         })
+                        .unwrap()
                     };
                     result
                         .send(response)
