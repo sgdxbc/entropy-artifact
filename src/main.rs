@@ -10,6 +10,7 @@ use awc::Client;
 use clap::Parser;
 use ed25519_dalek::SigningKey;
 use meeting_point::Run;
+use opentelemetry::trace::Tracer;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -92,11 +93,14 @@ async fn main() -> anyhow::Result<()> {
     let verifying_key = signing_key.verifying_key();
     let peer = Peer {
         uri: format!("http://{}:{}", cli.host, listener.local_addr()?.port()),
-        id: Sha256::digest(&verifying_key).into(),
+        id: Sha256::digest(verifying_key).into(),
         key: verifying_key,
     };
 
+    let span = opentelemetry::global::tracer("").start("join network");
+    let active = opentelemetry::trace::mark_span_as_active(span);
     let run = join_network(&peer, &cli).await?;
+    drop(active);
     let store = Arc::new(Store::new(Vec::from_iter(
         run.participants.into_iter().filter_map(|participant| {
             if let Participant::Peer(peer) = participant {
@@ -123,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+// #[instrument(skip_all, fields(peer = common::hex_string(&peer.id)))]
 async fn join_network(peer: &Peer, cli: &Cli) -> anyhow::Result<ReadyRun> {
     let client = Client::new();
     let mut response = client

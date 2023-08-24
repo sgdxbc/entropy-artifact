@@ -141,7 +141,7 @@ impl<S> State<S> {
     {
         while let Some(message) = messages.recv().await {
             // tokio::time::sleep(Duration::from_millis(100)).await;
-            let _entered = info_span!(parent: &message.span, "run command").entered();
+            let _entered = info_span!(parent: &message.span, "execute command").entered();
             match message.command {
                 AppCommand::Join(participant, result) => {
                     self.participant_id += 1;

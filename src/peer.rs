@@ -74,7 +74,7 @@ mod tests {
             assert_eq!(closest.len(), 10);
             assert!(closest
                 .into_iter()
-                .any(|p| p as *const _ == peer as *const _));
+                .any(|p| std::ptr::eq(p, peer)));
         }
     }
 }

@@ -20,7 +20,7 @@ pub fn setup_tracing(service_name: &str) {
 }
 
 pub async fn shutdown_tracing() {
-    tokio::task::spawn_blocking(|| opentelemetry::global::shutdown_tracer_provider())
+    tokio::task::spawn_blocking(opentelemetry::global::shutdown_tracer_provider)
         .await
         .unwrap()
 }
@@ -53,4 +53,12 @@ impl Display for HandlerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }
+}
+
+pub fn hex_string(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .reduce(|s1, s2| s1 + &s2)
+        .unwrap()
 }
