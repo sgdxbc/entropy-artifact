@@ -5,7 +5,7 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
-use tokio::{fs, spawn};
+use tokio::fs;
 use wirehair::{WirehairDecoder, WirehairEncoder};
 
 pub struct Store {

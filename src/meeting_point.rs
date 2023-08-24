@@ -16,6 +16,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
+use tracing::{info_span, Span};
 
 use crate::common::HandlerResult;
 
@@ -33,7 +34,7 @@ enum Activity {
     Leave(Value),
 }
 
-type AppState = mpsc::UnboundedSender<AppCommand>;
+type AppState = mpsc::UnboundedSender<StateMessage>;
 
 enum AppCommand {
     Join(Value, oneshot::Sender<u32>),
@@ -43,17 +44,32 @@ enum AppCommand {
     // interval activities
 }
 
+struct StateMessage {
+    command: AppCommand,
+    span: Span,
+}
+
+impl From<AppCommand> for StateMessage {
+    fn from(value: AppCommand) -> Self {
+        Self {
+            command: value,
+            span: Span::current(),
+        }
+    }
+}
+
 #[post("/join")]
-// #[instrument(skip(data, participant))]
+#[tracing::instrument(skip_all)]
 async fn join(data: Data<AppState>, participant: Json<Value>) -> HandlerResult<HttpResponse> {
     let participant_id = oneshot::channel();
-    data.send(AppCommand::Join(participant.0, participant_id.0))?;
+    data.send(AppCommand::Join(participant.0, participant_id.0).into())?;
     Ok(HttpResponse::Ok().json(json!({ "id": participant_id.1.await? })))
 }
 
 #[post("/leave/{id}")]
+#[tracing::instrument(skip(data))]
 async fn leave(data: Data<AppState>, id: Path<u32>) -> HandlerResult<HttpResponse> {
-    data.send(AppCommand::Leave(id.into_inner()))?;
+    data.send(AppCommand::Leave(id.into_inner()).into())?;
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -68,9 +84,10 @@ pub enum Run<P, S> {
 }
 
 #[get("/run")]
+#[tracing::instrument(skip(data))]
 async fn run_status(data: Data<AppState>) -> HandlerResult<HttpResponse> {
     let run = oneshot::channel();
-    data.send(AppCommand::RunStatus(run.0))?;
+    data.send(AppCommand::RunStatus(run.0).into())?;
     Ok(HttpResponse::Ok().json(run.1.await?))
 }
 
@@ -116,14 +133,16 @@ impl<S> State<S> {
 
     async fn run<P>(
         &mut self,
-        mut command: mpsc::UnboundedReceiver<AppCommand>,
+        mut messages: mpsc::UnboundedReceiver<StateMessage>,
     ) -> anyhow::Result<()>
     where
         S: Serialize + Clone,
         P: Serialize,
     {
-        while let Some(command) = command.recv().await {
-            match command {
+        while let Some(message) = messages.recv().await {
+            // tokio::time::sleep(Duration::from_millis(100)).await;
+            let _entered = info_span!(parent: &message.span, "run command").entered();
+            match message.command {
                 AppCommand::Join(participant, result) => {
                     self.participant_id += 1;
                     assert!(self.participants.len() < self.ready_number);
