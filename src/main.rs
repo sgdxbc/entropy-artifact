@@ -124,6 +124,8 @@ async fn main() -> anyhow::Result<()> {
         run.shared.inner_n,
     );
 
+    let (app_handle, configuration) = app::State::spawn(peer, signing_key, peer_store, chunk_store);
+
     println!("READY");
     let assemble_time = run.assemble_time;
     let user_task = spawn(async move {
@@ -135,14 +137,19 @@ async fn main() -> anyhow::Result<()> {
     });
 
     HttpServer::new(move || {
-        App::new().wrap(actix_web_opentelemetry::RequestTracing::new())
-        //
+        App::new()
+            .wrap(actix_web_opentelemetry::RequestTracing::new())
+            .configure(configuration.clone())
     })
     .listen(listener.into_std()?)?
     .run()
     .await?;
 
-    user_task.await?;
+    app_handle.await??;
+    if !user_task.is_finished() {
+        println!("WARN user task not finished");
+        user_task.abort();
+    }
     tokio::fs::remove_dir_all(&chunk_path).await?;
     leave_network(&cli, run.join_id).await?;
     common::shutdown_tracing().await;

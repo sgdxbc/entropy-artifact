@@ -115,12 +115,12 @@ impl<S> State<S> {
         P: Serialize,
     {
         let mut state = Self::new(expect_number, shared);
-        let command = mpsc::unbounded_channel();
+        let messages = mpsc::unbounded_channel();
         let handle = spawn(async move {
-            state.run::<P>(command.1).await?;
+            state.run::<P>(messages.1).await?;
             Ok(state)
         });
-        (handle, |config| Self::config(config, command.0))
+        (handle, |config| Self::config(config, messages.0))
     }
 
     fn config(config: &mut ServiceConfig, app_data: AppState) {
