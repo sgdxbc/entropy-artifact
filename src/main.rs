@@ -1,9 +1,9 @@
 use std::{
-    sync::Arc,
+    path::PathBuf,
     time::{Duration, SystemTime},
 };
 
-use actix_web::{http::StatusCode, web::Data, App, HttpServer};
+use actix_web::{http::StatusCode, App, HttpServer};
 use actix_web_opentelemetry::ClientExt;
 use anyhow::{anyhow, bail};
 use awc::Client;
@@ -14,11 +14,11 @@ use opentelemetry::trace::Tracer;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{net::TcpListener, time::sleep};
+use tokio::{net::TcpListener, spawn, time::sleep};
 
 use crate::peer::Peer;
-use crate::peer::Store;
 
+mod app;
 mod chunk;
 mod common;
 mod meeting_point;
@@ -41,11 +41,12 @@ struct Cli {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Shared {
-    fragment_size: usize,
+    fragment_size: u32,
     inner_k: u32,
     inner_n: u32,
     outer_k: u32,
     outer_n: u32,
+    chunk_root: PathBuf,
 }
 
 struct ReadyRun {
@@ -70,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
                 inner_n: 80,
                 outer_k: 8,
                 outer_n: 10,
+                chunk_root: "/local/cowsay/_entropy_chunk".into(),
             },
         );
         HttpServer::new(move || {
@@ -101,27 +103,47 @@ async fn main() -> anyhow::Result<()> {
     let active = opentelemetry::trace::mark_span_as_active(span);
     let run = join_network(&peer, &cli).await?;
     drop(active);
-    let store = Arc::new(Store::new(Vec::from_iter(
-        run.participants.into_iter().filter_map(|participant| {
+
+    let peer_store = peer::Store::new(Vec::from_iter(run.participants.into_iter().filter_map(
+        |participant| {
             if let Participant::Peer(peer) = participant {
                 Some(peer)
             } else {
                 None
             }
-        }),
+        },
     )));
-    assert_eq!(store.closest_peers(&peer.id, 1)[0].id, peer.id);
+    assert_eq!(peer_store.closest_peers(&peer.id, 1)[0].id, peer.id);
+
+    let chunk_path = run.shared.chunk_root.join(common::hex_string(&peer.id));
+    tokio::fs::create_dir_all(&chunk_path).await?;
+    let chunk_store = chunk::Store::new(
+        chunk_path.clone(),
+        run.shared.fragment_size,
+        run.shared.inner_k,
+        run.shared.inner_n,
+    );
 
     println!("READY");
+    let assemble_time = run.assemble_time;
+    let user_task = spawn(async move {
+        let wait_duration =
+            Duration::from_millis(100).saturating_sub(assemble_time.elapsed().unwrap_or_default());
+        sleep(wait_duration).await;
+
+        //
+    });
+
     HttpServer::new(move || {
-        App::new()
-            .wrap(actix_web_opentelemetry::RequestTracing::new())
-            .app_data(Data::new(store.clone()))
+        App::new().wrap(actix_web_opentelemetry::RequestTracing::new())
+        //
     })
     .listen(listener.into_std()?)?
     .run()
     .await?;
 
+    user_task.await?;
+    tokio::fs::remove_dir_all(&chunk_path).await?;
     leave_network(&cli, run.join_id).await?;
     common::shutdown_tracing().await;
     Ok(())
