@@ -5,7 +5,7 @@ use std::{
 
 use actix_web::{http::StatusCode, web::Data, App, HttpServer};
 use actix_web_opentelemetry::ClientExt;
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use awc::Client;
 use clap::Parser;
 use ed25519_dalek::SigningKey;
@@ -17,10 +17,10 @@ use tokio::{net::TcpListener, time::sleep};
 use crate::peer::Peer;
 use crate::peer::Store;
 
+mod chunk;
 mod common;
 mod meeting_point;
 mod peer;
-mod chunk;
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Participant {
@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(expect_number) = cli.serve_meeting_point {
         common::setup_tracing("entropy.meeting-point");
 
-        let state = meeting_point::State::new(
+        let (state_handle, configure) = meeting_point::State::spawn(
             expect_number,
             serde_json::to_value(Shared {
                 fragment_size: 1024,
@@ -74,12 +74,13 @@ async fn main() -> anyhow::Result<()> {
         HttpServer::new(move || {
             App::new()
                 .wrap(actix_web_opentelemetry::RequestTracing::new())
-                .configure(|c| state.config(c))
+                .configure(configure.clone())
         })
         .bind((cli.host, 8080))?
         .run()
         .await?;
 
+        state_handle.await??; // inspect returned state if necessary
         common::shutdown_tracing().await;
         return Ok(());
     }
@@ -124,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn join_network(peer: &Peer, cli: &Cli) -> anyhow::Result<ReadyRun> {
     let client = Client::new();
-    let join_id = client
+    let mut response = client
         .post(format!(
             "http://{}:8080/join",
             cli.meeting_point.as_ref().unwrap()
@@ -132,9 +133,11 @@ async fn join_network(peer: &Peer, cli: &Cli) -> anyhow::Result<ReadyRun> {
         .trace_request()
         .send_json(&Participant::Peer(peer.clone()))
         .await
-        .map_err(|_| anyhow!("send request error"))?
-        .json::<serde_json::Value>()
-        .await?["id"]
+        .map_err(|_| anyhow!("send request error"))?;
+    if response.status() != StatusCode::OK {
+        bail!(String::from_utf8(response.body().await?.to_vec())?)
+    }
+    let join_id = response.json::<serde_json::Value>().await?["id"]
         .to_string()
         .parse()?;
 
