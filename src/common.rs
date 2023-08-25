@@ -7,11 +7,11 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 pub fn setup_tracing(service_name: &str) {
-    opentelemetry::global::set_text_map_propagator(opentelemetry_zipkin::Propagator::new());
-    let tracer = opentelemetry_zipkin::new_pipeline()
+    opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
+    let tracer = opentelemetry_jaeger::new_agent_pipeline()
         .with_service_name(service_name)
         .install_batch(opentelemetry::runtime::Tokio)
-        .expect("unable to install zipkin tracer");
+        .expect("unable to install jaeger tracer");
     tracing_subscriber::registry()
         // .with(tracing_subscriber::fmt::layer().json())
         .with(EnvFilter::from_default_env())

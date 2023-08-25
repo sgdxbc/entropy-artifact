@@ -14,7 +14,7 @@ awc = "3.1.1"
 clap = { version = "4.3.23", features = ["derive"] }
 ed25519-dalek = { version = "2.0.0", features = ["serde", "rand_core"] }
 opentelemetry = { version = "0.20.0", features = ["rt-tokio"] }
-opentelemetry-zipkin = { version = "0.18.0", features = ["reqwest-client"], default-features = false }
+opentelemetry-jaeger = { version = "0.19.0", features = ["rt-tokio"] }
 rand = "0.8.5"
 serde = { version = "1.0.185", features = ["derive"] }
 serde_json = "1.0.105"

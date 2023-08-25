@@ -6,8 +6,8 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), TraceError> {
-    global::set_text_map_propagator(opentelemetry_zipkin::Propagator::new());
-    let tracer = opentelemetry_zipkin::new_pipeline()
+    global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
+    let tracer = opentelemetry_jaeger::new_agent_pipeline()
         // .install_simple()?;
         .install_batch(opentelemetry::runtime::Tokio)?;
 

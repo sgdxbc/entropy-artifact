@@ -1,5 +1,11 @@
 #### Preliminary Starting Steps
 
+Prepare third-party dependencies.
+
+```
+$ git clone https://github.com/catid/wirehair wirehair/wirehair
+```
+
 Run meeting point service.
 
 ```
