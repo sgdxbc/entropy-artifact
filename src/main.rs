@@ -34,7 +34,7 @@ enum Participant {
 struct Cli {
     host: String,
     #[clap(long)]
-    serve_meeting_point: Option<usize>,
+    meeting_point_service: Option<usize>,
     #[clap(long)]
     meeting_point: Option<String>,
 }
@@ -60,7 +60,7 @@ struct ReadyRun {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    if let Some(expect_number) = cli.serve_meeting_point {
+    if let Some(expect_number) = cli.meeting_point_service {
         common::setup_tracing("entropy.meeting-point");
 
         let (state_handle, configure) = meeting_point::State::spawn::<Participant>(

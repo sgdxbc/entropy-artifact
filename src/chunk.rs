@@ -95,6 +95,9 @@ impl Store {
     }
 
     pub fn recover_chunk(&mut self, key: &ChunkKey) {
+        if self.recovers.contains_key(key) {
+            return;
+        }
         let decoder = WirehairDecoder::new(
             self.fragment_size as u64 * self.inner_k as u64,
             self.fragment_size,
@@ -103,7 +106,7 @@ impl Store {
             .insert(*key, Arc::new(Mutex::new(Some(decoder))));
     }
 
-    pub async fn accept_fragment(
+    pub fn accept_fragment(
         &self,
         key: &ChunkKey,
         remote_index: u32,
@@ -137,5 +140,10 @@ impl Store {
                 fragment
             }))
         }
+    }
+
+    pub fn finish_recover(&mut self, key: &ChunkKey) {
+        self.recovers.remove(key);
+        // assert returns None?
     }
 }

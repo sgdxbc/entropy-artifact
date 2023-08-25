@@ -5,15 +5,22 @@ use actix_web::{
     web::{Bytes, Data, Json, Path, ServiceConfig},
     HttpResponse,
 };
+use actix_web_opentelemetry::ClientExt;
+use awc::Client;
 use ed25519_dalek::SigningKey;
+use rand::seq::index;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{spawn, sync::mpsc, task::JoinHandle};
+use tokio::{
+    spawn,
+    sync::mpsc,
+    task::{spawn_local, JoinHandle},
+};
 use tracing::Span;
 
 use crate::{
     chunk::{self, ChunkKey},
-    common::HandlerResult,
+    common::{hex_string, HandlerResult},
     peer::{self, Peer},
 };
 
@@ -61,7 +68,7 @@ struct InviteMessage {
     members: Vec<ChunkMember>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChunkMember {
     index: u32,
     peer: Peer,
@@ -107,7 +114,7 @@ async fn accept_fragment(
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PingMessage {
-    peer: Peer,
+    members: Vec<ChunkMember>,
     proof: (),
 }
 
@@ -133,6 +140,7 @@ struct ChunkState {
     local_index: u32,
     members: Vec<ChunkMember>,
     indexes: Range<u32>,
+    fragment_present: bool,
 }
 
 impl State {
@@ -160,7 +168,24 @@ impl State {
         (handle, |config| Self::config(config, messages.0))
     }
 
-    async fn run(&mut self, messages: mpsc::UnboundedReceiver<StateMessage>) -> anyhow::Result<()> {
+    async fn run(
+        &mut self,
+        mut messages: mpsc::UnboundedReceiver<StateMessage>,
+    ) -> anyhow::Result<()> {
+        while let Some(message) = messages.recv().await {
+            match message.command {
+                AppCommand::Invite(key, index, message) => {
+                    self.handle_invite(&key, index, message).await
+                }
+                AppCommand::QueryFragment(key, message) => {
+                    self.handle_query_fragment(&key, message).await
+                }
+                AppCommand::AcceptFragment(key, index, fragment) => {
+                    self.handle_accept_fragment(&key, index, fragment).await
+                }
+                _ => todo!(),
+            }
+        }
         Ok(())
     }
 
@@ -171,5 +196,98 @@ impl State {
             .service(query_fragment)
             .service(accept_fragment)
             .service(ping);
+    }
+
+    async fn handle_invite(&mut self, key: &ChunkKey, index: u32, message: InviteMessage) {
+        let chunk_state = self.chunk_states.entry(*key).or_insert(ChunkState {
+            local_index: index,
+            members: message.members.clone(),
+            indexes: 0..1,
+            fragment_present: false,
+        });
+        if chunk_state.fragment_present {
+            return;
+        }
+
+        // TODO generate proof
+        self.chunk_store.recover_chunk(key);
+        let key = hex_string(key);
+        for member in message.members {
+            // TODO skip query for already-have fragments
+            let local_peer = self.local_peer.clone();
+            let key = key.clone();
+            spawn_local(async move {
+                let _ = Client::new()
+                    .post(format!("http://{}/query-fragment/{key}", member.peer.uri))
+                    .trace_request()
+                    .send_json(&QueryFragmentMessage {
+                        peer: local_peer,
+                        index: Some(index),
+                        proof: (),
+                    })
+                    .await;
+            });
+        }
+    }
+
+    async fn handle_query_fragment(&mut self, key: &ChunkKey, message: QueryFragmentMessage) {
+        // TODO verify proof
+        let Some(chunk_state) = self.chunk_states.get(key) else {
+            //
+            return;
+        };
+        assert!(chunk_state.fragment_present);
+        let index = chunk_state.local_index;
+        let fragment = self.chunk_store.get_fragment(key, index);
+        let key = hex_string(key);
+        spawn_local(async move {
+            let Ok(fragment) = fragment.await else {
+                //
+                return;
+            };
+            let _ = Client::new()
+                .post(format!(
+                    "http://{}/fragment/{key}/{index}",
+                    message.peer.uri
+                ))
+                .trace_request()
+                .send_body(fragment)
+                .await;
+        });
+    }
+
+    async fn handle_accept_fragment(&mut self, key: &ChunkKey, index: u32, fragment: Bytes) {
+        let Some(chunk_state) = self.chunk_states.get(key) else {
+            //
+            return;
+        };
+        if chunk_state.fragment_present {
+            //
+            return;
+        }
+        if index == chunk_state.local_index {
+            let task = self.chunk_store.put_fragment(key, index, fragment.to_vec());
+            spawn(async move {
+                if task.await.is_err() {
+                    //
+                }
+            });
+        } else {
+            let task = self.chunk_store.accept_fragment(
+                key,
+                index,
+                fragment.to_vec(),
+                chunk_state.local_index,
+            );
+            spawn(async move {
+                let Ok(fragment) = task.await else {
+                    //
+                    return;
+                };
+                if let Some(fragment) = fragment {
+                    //
+                }
+            });
+        }
     }
 }
