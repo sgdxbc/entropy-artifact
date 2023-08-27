@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail};
 use awc::Client;
 use clap::Parser;
 use ed25519_dalek::SigningKey;
-use meeting_point::Run;
+use plaza::Run;
 use opentelemetry::trace::Tracer;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use crate::peer::Peer;
 mod app;
 mod chunk;
 mod common;
-mod meeting_point;
+mod plaza;
 mod peer;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,9 +34,9 @@ enum Participant {
 struct Cli {
     host: String,
     #[clap(long)]
-    meeting_point_service: Option<usize>,
+    plaza_service: Option<usize>,
     #[clap(long)]
-    meeting_point: Option<String>,
+    plaza: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,10 +60,10 @@ struct ReadyRun {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    if let Some(expect_number) = cli.meeting_point_service {
+    if let Some(expect_number) = cli.plaza_service {
         common::setup_tracing("entropy.meeting-point");
 
-        let (state_handle, configure) = meeting_point::State::spawn::<Participant>(
+        let (state_handle, configure) = plaza::State::spawn::<Participant>(
             expect_number,
             Shared {
                 fragment_size: 1024,
@@ -162,7 +162,7 @@ async fn join_network(peer: &Peer, cli: &Cli) -> anyhow::Result<ReadyRun> {
     let mut response = client
         .post(format!(
             "http://{}:8080/join",
-            cli.meeting_point.as_ref().unwrap()
+            cli.plaza.as_ref().unwrap()
         ))
         .trace_request()
         .send_json(&Participant::Peer(peer.clone()))
@@ -181,13 +181,13 @@ async fn join_network(peer: &Peer, cli: &Cli) -> anyhow::Result<ReadyRun> {
         match client
             .get(format!(
                 "http://{}:8080/run",
-                cli.meeting_point.as_ref().unwrap()
+                cli.plaza.as_ref().unwrap()
             ))
             .trace_request()
             .send()
             .await
             .map_err(|_| anyhow!("send request_error"))?
-            .json::<meeting_point::Run<Participant, Shared>>()
+            .json::<plaza::Run<Participant, Shared>>()
             .await?
         {
             Run::Retry(interval) => retry_interval = interval,
@@ -215,7 +215,7 @@ async fn leave_network(cli: &Cli, join_id: u32) -> anyhow::Result<()> {
     let response = client
         .post(format!(
             "http://{}:8080/leave/{join_id}",
-            cli.meeting_point.as_ref().unwrap()
+            cli.plaza.as_ref().unwrap()
         ))
         .trace_request()
         .send()

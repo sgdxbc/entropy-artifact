@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use opentelemetry::global;
 use opentelemetry::trace::TraceError;
 use tracing_subscriber::layer::SubscriberExt;
@@ -9,12 +11,8 @@ async fn main() -> Result<(), TraceError> {
     global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
     let tracer = opentelemetry_jaeger::new_agent_pipeline()
         // .install_simple()?;
+        .with_service_name("tracing_demo")
         .install_batch(opentelemetry::runtime::Tokio)?;
-
-    // let provider = TracerProvider::builder()
-    //     .with_simple_exporter(opentelemetry_stdout::SpanExporter::default())
-    //     .build();
-    // let tracer = provider.tracer("test".to_string());
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().json())
@@ -23,9 +21,15 @@ async fn main() -> Result<(), TraceError> {
         .init();
 
     let span = tracing::info_span!("do some work");
-    let entered = span.entered();
-    println!("in span");
-    drop(entered);
+    let enter = span.enter();
+    println!("in span #1");
+    drop(enter);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let enter = span.enter();
+    println!("in span #2");
+    drop(enter);
+    drop(span);
 
     // tracer.in_span("doing_work", |cx| {
     //     // Traced app logic here...
