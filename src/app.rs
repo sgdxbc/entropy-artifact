@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    future::Future,
     ops::Range,
 };
 
@@ -23,7 +22,7 @@ use tracing::Span;
 
 use crate::{
     chunk::{self, ChunkKey},
-    common::{hex_string, HandlerResult},
+    common::{hex_string, Result},
     peer::{self, Peer},
 };
 
@@ -103,41 +102,11 @@ struct ChunkMember {
     proof: (),
 }
 
-#[post("/invite/{key}/{index}")]
-async fn invite(
-    data: Data<AppState>,
-    path: Path<(String, u32)>,
-    message: Json<InviteMessage>,
-) -> HandlerResult<HttpResponse> {
-    data.send(AppCommand::Invite(parse_key(&path.0), path.1, message.0).into())?;
-    Ok(HttpResponse::Ok().finish())
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct QueryFragmentMessage {
     peer: Peer,
     index: Option<u32>, // sender is egligible to store, or `None` for GET operation
     proof: (),
-}
-
-#[post("/query-fragment/{key}")]
-async fn query_fragment(
-    data: Data<AppState>,
-    path: Path<String>,
-    message: Json<QueryFragmentMessage>,
-) -> HandlerResult<HttpResponse> {
-    data.send(AppCommand::QueryFragment(parse_key(&path), message.0).into())?;
-    Ok(HttpResponse::Ok().finish())
-}
-
-#[post("/fragment/{key}/{index}")]
-async fn accept_fragment(
-    data: Data<AppState>,
-    path: Path<(String, u32)>,
-    fragment: Bytes,
-) -> HandlerResult<HttpResponse> {
-    data.send(AppCommand::AcceptFragment(parse_key(&path.0), path.1, fragment).into())?;
-    Ok(HttpResponse::Ok().finish())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -148,14 +117,48 @@ struct PingMessage {
     signature: ed25519_dalek::Signature,
 }
 
+#[post("/invite/{key}/{index}")]
+async fn invite(
+    data: Data<AppState>,
+    path: Path<(String, u32)>,
+    message: Json<InviteMessage>,
+) -> HttpResponse {
+    data.send(AppCommand::Invite(parse_key(&path.0), path.1, message.0).into())
+        .unwrap();
+    HttpResponse::Ok().finish()
+}
+
+#[post("/query-fragment/{key}")]
+async fn query_fragment(
+    data: Data<AppState>,
+    path: Path<String>,
+    message: Json<QueryFragmentMessage>,
+) -> HttpResponse {
+    data.send(AppCommand::QueryFragment(parse_key(&path), message.0).into())
+        .unwrap();
+    HttpResponse::Ok().finish()
+}
+
+#[post("/fragment/{key}/{index}")]
+async fn accept_fragment(
+    data: Data<AppState>,
+    path: Path<(String, u32)>,
+    fragment: Bytes,
+) -> HttpResponse {
+    data.send(AppCommand::AcceptFragment(parse_key(&path.0), path.1, fragment).into())
+        .unwrap();
+    HttpResponse::Ok().finish()
+}
+
 #[post("/ping/{key}/{index}")]
 async fn ping(
     data: Data<AppState>,
     path: Path<(String, u32)>,
     message: Json<PingMessage>,
-) -> HandlerResult<HttpResponse> {
-    data.send(AppCommand::Ping(parse_key(&path.0), path.1, message.0).into())?;
-    Ok(HttpResponse::Ok().finish())
+) -> HttpResponse {
+    data.send(AppCommand::Ping(parse_key(&path.0), path.1, message.0).into())
+        .unwrap();
+    HttpResponse::Ok().finish()
 }
 
 pub struct State {
@@ -182,7 +185,7 @@ impl State {
         peer_store: peer::Store,
         chunk_store: chunk::Store,
     ) -> (
-        JoinHandle<anyhow::Result<Self>>,
+        JoinHandle<Result<Self>>,
         impl FnOnce(&mut ServiceConfig) + Clone,
     ) {
         let messages = mpsc::unbounded_channel();
@@ -201,10 +204,7 @@ impl State {
         (handle, |config| Self::config(config, messages.0))
     }
 
-    async fn run(
-        &mut self,
-        mut messages: mpsc::UnboundedReceiver<StateMessage>,
-    ) -> anyhow::Result<()> {
+    async fn run(&mut self, mut messages: mpsc::UnboundedReceiver<StateMessage>) -> Result<()> {
         while let Some(message) = messages.recv().await {
             match message.command {
                 AppCommand::Invite(key, index, message) => self.handle_invite(&key, index, message),
@@ -232,30 +232,6 @@ impl State {
             .service(ping);
     }
 
-    fn protected_spawn<T: Send + 'static>(
-        &self,
-        task: impl Future<Output = anyhow::Result<T>> + Send + 'static,
-    ) -> JoinHandle<T> {
-        spawn(async move {
-            match task.await {
-                Ok(result) => result,
-                Err(_) => todo!(),
-            }
-        })
-    }
-
-    fn protected_spawn_local<T: 'static>(
-        &self,
-        task: impl Future<Output = anyhow::Result<T>> + 'static,
-    ) -> JoinHandle<T> {
-        spawn_local(async move {
-            match task.await {
-                Ok(result) => result,
-                Err(_) => todo!(),
-            }
-        })
-    }
-
     fn handle_invite(&mut self, key: &ChunkKey, index: u32, message: InviteMessage) {
         let chunk_state = self.chunk_states.entry(*key).or_insert(ChunkState {
             local_index: index,
@@ -275,7 +251,7 @@ impl State {
             // TODO skip query for already-have fragments
             let local_peer = self.local_peer.clone();
             let key = key.clone();
-            self.protected_spawn_local(async move {
+            spawn_local(async move {
                 Client::new()
                     .post(format!("http://{}/query-fragment/{key}", member.peer.uri))
                     .trace_request()
@@ -285,8 +261,7 @@ impl State {
                         proof: (),
                     })
                     .await
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-                Ok(())
+                    .unwrap();
             });
         }
     }

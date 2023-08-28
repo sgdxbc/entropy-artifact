@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use tokio::{fs, task::spawn_blocking};
 use wirehair::{WirehairDecoder, WirehairEncoder};
 
-use crate::common::hex_string;
+use crate::common::{hex_string, Result};
 
 pub struct Store {
     path: PathBuf,
@@ -47,7 +47,7 @@ impl Store {
         &mut self,
         key: &ChunkKey,
         index: u32,
-    ) -> impl Future<Output = anyhow::Result<Option<Vec<u8>>>> {
+    ) -> impl Future<Output = Result<Option<Vec<u8>>>> {
         let encoder = self.upload_chunks[key].clone();
         let fragment_size = self.fragment_size;
         async move {
@@ -75,7 +75,7 @@ impl Store {
         key: &ChunkKey,
         index: u32,
         fragment: Vec<u8>,
-    ) -> impl Future<Output = anyhow::Result<()>> {
+    ) -> impl Future<Output = Result<()>> {
         assert_eq!(fragment.len(), self.fragment_size as usize);
         let chunk_dir = self.chunk_dir(key);
         async move {
@@ -89,7 +89,7 @@ impl Store {
         &self,
         key: &ChunkKey,
         index: u32,
-    ) -> impl Future<Output = anyhow::Result<Vec<u8>>> {
+    ) -> impl Future<Output = Result<Vec<u8>>> {
         let chunk_dir = self.chunk_dir(key);
         async move { Ok(fs::read(chunk_dir.join(format!("{index}"))).await?) }
     }
@@ -112,21 +112,23 @@ impl Store {
         remote_index: u32,
         remote_fragment: Vec<u8>,
         index: u32,
-    ) -> impl Future<Output = anyhow::Result<Option<Vec<u8>>>> {
+    ) -> impl Future<Output = Result<Option<Vec<u8>>>> {
         assert_eq!(remote_fragment.len(), self.fragment_size as usize);
         let decoder_cell = self.recovers[key].clone();
         let fragment_size = self.fragment_size;
         async move {
             let decoder = spawn_blocking(move || {
                 let mut decoder_cell = decoder_cell.lock().unwrap();
-                if let Some(decoder) = &mut *decoder_cell {
-                    if decoder.decode(remote_index, &remote_fragment)? {
-                        return Result::<_, wirehair::WirehairResult>::Ok(Some(
-                            decoder_cell.take().unwrap(),
-                        ));
-                    }
-                }
-                Ok(None)
+                let ready = if let Some(decoder) = &mut *decoder_cell {
+                    decoder.decode(remote_index, &remote_fragment)?
+                } else {
+                    return std::result::Result::<_, wirehair::WirehairResult>::Ok(None);
+                };
+                Ok(if ready {
+                    Some(decoder_cell.take().unwrap())
+                } else {
+                    None
+                })
             })
             .await??;
             Ok(decoder.map(|decoder| {

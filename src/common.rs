@@ -25,37 +25,8 @@ pub async fn shutdown_tracing() {
         .unwrap()
 }
 
-pub type LocalResult<T> = Result<T, Box<dyn std::error::Error>>;
-
-#[derive(Debug)]
-pub struct HandlerError(anyhow::Error);
-
-pub type HandlerResult<T> = Result<T, HandlerError>;
-
-impl<T> From<T> for HandlerError
-where
-    anyhow::Error: From<T>,
-{
-    fn from(value: T) -> Self {
-        Self(value.into())
-    }
-}
-
-impl ResponseError for HandlerError {
-    fn status_code(&self) -> actix_web::http::StatusCode {
-        StatusCode::INTERNAL_SERVER_ERROR
-    }
-
-    fn error_response(&self) -> HttpResponse {
-        HttpResponse::build(self.status_code()).body(format!("{self}"))
-    }
-}
-
-impl Display for HandlerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub type LocalResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub fn hex_string(bytes: &[u8]) -> String {
     bytes

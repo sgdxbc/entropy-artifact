@@ -35,7 +35,7 @@ $ curl -X POST http://<PEER_URI>/benchmark/put
 
 Shutdown peers
 ```
-$ curl -X POST http://<PLAZE_HOST_NAME>:8080/run
+$ curl -X POST http://<PLAZE_HOST_NAME>:8080/shutdown
 ```
 
 Shutdown plaza service by sending a `SIGTERM`

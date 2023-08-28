@@ -1,4 +1,5 @@
 use std::{
+    error::Error,
     future::Future,
     path::PathBuf,
     time::{Duration, SystemTime},
@@ -107,7 +108,7 @@ async fn main() -> LocalResult<()> {
     drop(active);
 
     let mut shutdown = mpsc::unbounded_channel();
-    let _ = spawn_local(poll_network(&cli, shutdown.0));
+    spawn_local(poll_network(&cli, shutdown.0));
 
     let peer_store = peer::Store::new(Vec::from_iter(run.participants.into_iter().filter_map(
         |participant| {
@@ -149,13 +150,13 @@ async fn main() -> LocalResult<()> {
     .listen(listener.into_std()?)?
     .run();
     let server_handle = server.handle();
-    let _ = spawn(async move {
+    spawn(async move {
         shutdown.1.recv().await;
         server_handle.stop(true).await;
     });
     server.await?;
 
-    app_handle.await??;
+    app_handle.await?.map_err(|err| err as Box<dyn Error>)?;
     if !user_task.is_finished() {
         println!("WARN user task not finished");
         user_task.abort();
