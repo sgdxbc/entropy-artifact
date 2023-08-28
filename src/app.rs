@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     ops::Range,
 };
 
@@ -33,7 +34,7 @@ use crate::{
 // 1. uploader send Invite{members = [uploader]} to initial group members
 // 2. initial group members send QueryFragment{index = Some(i)} to uploader,
 //    uploader "reply" with Fragment(i)
-// 3. after pushing fragments to $k$ members, uploader send 
+// 3. after pushing fragments to $k$ members, uploader send
 //    Ping{index = None, members} to them
 //
 // repairing message flow
@@ -88,6 +89,7 @@ impl From<AppCommand> for StateMessage {
 }
 
 type AppState = mpsc::UnboundedSender<StateMessage>;
+pub type ShutdownServer = mpsc::UnboundedSender<()>;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct InviteMessage {
@@ -230,6 +232,30 @@ impl State {
             .service(ping);
     }
 
+    fn protected_spawn<T: Send + 'static>(
+        &self,
+        task: impl Future<Output = anyhow::Result<T>> + Send + 'static,
+    ) -> JoinHandle<T> {
+        spawn(async move {
+            match task.await {
+                Ok(result) => result,
+                Err(_) => todo!(),
+            }
+        })
+    }
+
+    fn protected_spawn_local<T: 'static>(
+        &self,
+        task: impl Future<Output = anyhow::Result<T>> + 'static,
+    ) -> JoinHandle<T> {
+        spawn_local(async move {
+            match task.await {
+                Ok(result) => result,
+                Err(_) => todo!(),
+            }
+        })
+    }
+
     fn handle_invite(&mut self, key: &ChunkKey, index: u32, message: InviteMessage) {
         let chunk_state = self.chunk_states.entry(*key).or_insert(ChunkState {
             local_index: index,
@@ -249,8 +275,8 @@ impl State {
             // TODO skip query for already-have fragments
             let local_peer = self.local_peer.clone();
             let key = key.clone();
-            spawn_local(async move {
-                let _ = Client::new()
+            self.protected_spawn_local(async move {
+                Client::new()
                     .post(format!("http://{}/query-fragment/{key}", member.peer.uri))
                     .trace_request()
                     .send_json(&QueryFragmentMessage {
@@ -258,7 +284,9 @@ impl State {
                         index: Some(index),
                         proof: (),
                     })
-                    .await;
+                    .await
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                Ok(())
             });
         }
     }
