@@ -1,28 +1,30 @@
 use std::{
+    future::Future,
     path::PathBuf,
     time::{Duration, SystemTime},
 };
 
 use actix_web::{http::StatusCode, App, HttpServer};
 use actix_web_opentelemetry::ClientExt;
-use anyhow::{anyhow, bail};
 use awc::Client;
 use clap::Parser;
+use common::LocalResult;
 use ed25519_dalek::SigningKey;
-use plaza::Run;
 use opentelemetry::trace::Tracer;
+use plaza::{News, Run};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{net::TcpListener, spawn, time::sleep};
+use tokio::{net::TcpListener, spawn, sync::mpsc, task::spawn_local, time::sleep};
 
+use crate::app::ShutdownServer;
 use crate::peer::Peer;
 
 mod app;
 mod chunk;
 mod common;
-mod plaza;
 mod peer;
+mod plaza;
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Participant {
@@ -57,7 +59,7 @@ struct ReadyRun {
 }
 
 #[actix_web::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> LocalResult<()> {
     let cli = Cli::parse();
 
     if let Some(expect_number) = cli.plaza_service {
@@ -83,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         .run()
         .await?;
 
-        state_handle.await??; // inspect returned state if necessary
+        state_handle.await?; // inspect returned state if necessary
         common::shutdown_tracing().await;
         return Ok(());
     }
@@ -103,6 +105,9 @@ async fn main() -> anyhow::Result<()> {
     let active = opentelemetry::trace::mark_span_as_active(span);
     let run = join_network(&peer, &cli).await?;
     drop(active);
+
+    let mut shutdown = mpsc::unbounded_channel();
+    let _ = spawn_local(poll_network(&cli, shutdown.0));
 
     let peer_store = peer::Store::new(Vec::from_iter(run.participants.into_iter().filter_map(
         |participant| {
@@ -136,14 +141,19 @@ async fn main() -> anyhow::Result<()> {
         //
     });
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         App::new()
             .wrap(actix_web_opentelemetry::RequestTracing::new())
             .configure(configuration.clone())
     })
     .listen(listener.into_std()?)?
-    .run()
-    .await?;
+    .run();
+    let server_handle = server.handle();
+    let _ = spawn(async move {
+        shutdown.1.recv().await;
+        server_handle.stop(true).await;
+    });
+    server.await?;
 
     app_handle.await??;
     if !user_task.is_finished() {
@@ -157,19 +167,15 @@ async fn main() -> anyhow::Result<()> {
 }
 
 // #[instrument(skip_all, fields(peer = common::hex_string(&peer.id)))]
-async fn join_network(peer: &Peer, cli: &Cli) -> anyhow::Result<ReadyRun> {
+async fn join_network(peer: &Peer, cli: &Cli) -> LocalResult<ReadyRun> {
     let client = Client::new();
     let mut response = client
-        .post(format!(
-            "http://{}:8080/join",
-            cli.plaza.as_ref().unwrap()
-        ))
+        .post(format!("http://{}:8080/join", cli.plaza.as_ref().unwrap()))
         .trace_request()
         .send_json(&Participant::Peer(peer.clone()))
-        .await
-        .map_err(|_| anyhow!("send request error"))?;
+        .await?;
     if response.status() != StatusCode::OK {
-        bail!(String::from_utf8(response.body().await?.to_vec())?)
+        return Err(String::from_utf8(response.body().await?.to_vec())?.into());
     }
     let join_id = response.json::<serde_json::Value>().await?["id"]
         .to_string()
@@ -179,14 +185,10 @@ async fn join_network(peer: &Peer, cli: &Cli) -> anyhow::Result<ReadyRun> {
     let run = loop {
         sleep(retry_interval).await;
         match client
-            .get(format!(
-                "http://{}:8080/run",
-                cli.plaza.as_ref().unwrap()
-            ))
+            .get(format!("http://{}:8080/run", cli.plaza.as_ref().unwrap()))
             .trace_request()
             .send()
-            .await
-            .map_err(|_| anyhow!("send request_error"))?
+            .await?
             .json::<plaza::Run<Participant, Shared>>()
             .await?
         {
@@ -210,7 +212,7 @@ async fn join_network(peer: &Peer, cli: &Cli) -> anyhow::Result<ReadyRun> {
     Ok(run)
 }
 
-async fn leave_network(cli: &Cli, join_id: u32) -> anyhow::Result<()> {
+async fn leave_network(cli: &Cli, join_id: u32) -> LocalResult<()> {
     let client = Client::new();
     let response = client
         .post(format!(
@@ -219,8 +221,28 @@ async fn leave_network(cli: &Cli, join_id: u32) -> anyhow::Result<()> {
         ))
         .trace_request()
         .send()
-        .await
-        .map_err(|_| anyhow!("send request error"))?;
+        .await?;
     assert_eq!(response.status(), StatusCode::OK);
     Ok(())
+}
+
+fn poll_network(cli: &Cli, shutdown: ShutdownServer) -> impl Future<Output = LocalResult<()>> {
+    let endpoint = format!("http://{}:8080/news", cli.plaza.as_ref().unwrap());
+    async move {
+        let client = Client::new();
+        loop {
+            sleep(Duration::from_secs(1)).await; //
+            let news = client
+                .get(&endpoint)
+                .trace_request()
+                .send()
+                .await?
+                .json::<News>()
+                .await?;
+            if news.shutdown {
+                shutdown.send(()).map_err(|_| "receiver dropped")?;
+                break Ok(());
+            }
+        }
+    }
 }

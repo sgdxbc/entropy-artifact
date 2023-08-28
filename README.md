@@ -6,8 +6,7 @@ Prepare third-party dependencies.
 $ git clone https://github.com/catid/wirehair wirehair/wirehair
 ```
 
-Run meeting point service.
-
+Run the plaza service
 ```
 $ RUST_LOG=info \
     cargo run --release -- <HOST_NAME> --plaza-service <N>
@@ -16,21 +15,30 @@ $ RUST_LOG=info \
 Replace `<HOST_NAME>` with server's publicly-known host name, e.g. `localhost`.
 Replace `<N>` with the number of peers to join the network.
 
-Then run each peer in a dedicated shell.
-
+Then run each peer in a dedicated shell
 ```
 $ RUST_LOG=info \
-    cargo run --release -- <HOST_NAME> --plaza <MEETING_POINT_HOST_NAME>
+    cargo run --release -- <HOST_NAME> --plaza <PLAZA_HOST_NAME>
 ```
 
 Peer prints `READY` after joining the network and finishing initialization.
 
-To shut down peers and meeting point service, send `SIGINT` to them.
-Notice that peers attempt to send `LEAVE` message to meeting point upon shutting
-down, so it's better to shut down meeting point service only after all peers are
-gone, i.e.
-
+Get a list of all peer URI's
 ```
-$ pkill -f "entropy.*--plaza "
-$ pkill -f "entrypy"
+$ curl http://<PLAZE_HOST_NAME>:8080/run | jq -r .Ready.participants[].Peer.uri
+```
+
+Perform a PUT benchmark on a peer (not implemented yet)
+```
+$ curl -X POST http://<PEER_URI>/benchmark/put
+```
+
+Shutdown peers
+```
+$ curl -X POST http://<PLAZE_HOST_NAME>:8080/run
+```
+
+Shutdown plaza service by sending a `SIGTERM`
+```
+$ pkill -TERM entropy
 ```

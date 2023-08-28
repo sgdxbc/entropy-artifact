@@ -8,7 +8,7 @@ use actix_web::{
     web::{Data, Json, Path, ServiceConfig},
     HttpResponse,
 };
-use anyhow::anyhow;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, to_value, Value};
 use tokio::{
@@ -18,14 +18,13 @@ use tokio::{
 };
 use tracing::{info_span, Span};
 
-use crate::common::HandlerResult;
-
 pub struct State<S> {
     participants: HashMap<u32, Value>,
     participant_id: u32,
     activities: BTreeMap<SystemTime, Activity>,
     ready_number: usize,
     assemble_time: Option<SystemTime>,
+    shutdown: bool,
     shared: S,
 }
 
@@ -39,9 +38,16 @@ type AppState = mpsc::UnboundedSender<StateMessage>;
 enum AppCommand {
     Join(Value, oneshot::Sender<u32>),
     Leave(u32),
+    Shutdown,
     // TODO implement this with `tokio::sync::watch`
     RunStatus(oneshot::Sender<Value>),
-    // interval activities
+    News(oneshot::Sender<News>),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct News {
+    pub shutdown: bool,
+    // TODO activities
 }
 
 struct StateMessage {
@@ -60,17 +66,26 @@ impl From<AppCommand> for StateMessage {
 
 #[post("/join")]
 #[tracing::instrument(skip_all)]
-async fn join(data: Data<AppState>, participant: Json<Value>) -> HandlerResult<HttpResponse> {
+async fn join(data: Data<AppState>, participant: Json<Value>) -> HttpResponse {
     let participant_id = oneshot::channel();
-    data.send(AppCommand::Join(participant.0, participant_id.0).into())?;
-    Ok(HttpResponse::Ok().json(json!({ "id": participant_id.1.await? })))
+    data.send(AppCommand::Join(participant.0, participant_id.0).into())
+        .unwrap();
+    HttpResponse::Ok().json(json!({ "id": participant_id.1.await.unwrap() }))
 }
 
 #[post("/leave/{id}")]
 #[tracing::instrument(skip(data))]
-async fn leave(data: Data<AppState>, id: Path<u32>) -> HandlerResult<HttpResponse> {
-    data.send(AppCommand::Leave(id.into_inner()).into())?;
-    Ok(HttpResponse::Ok().finish())
+async fn leave(data: Data<AppState>, id: Path<u32>) -> HttpResponse {
+    data.send(AppCommand::Leave(id.into_inner()).into())
+        .unwrap();
+    HttpResponse::Ok().finish()
+}
+
+#[post("/shutdown")]
+#[tracing::instrument(skip(data))]
+async fn shutdown(data: Data<AppState>) -> HttpResponse {
+    data.send(AppCommand::Shutdown.into()).unwrap();
+    HttpResponse::Ok().finish()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -85,10 +100,18 @@ pub enum Run<P, S> {
 
 #[get("/run")]
 #[tracing::instrument(skip(data))]
-async fn run_status(data: Data<AppState>) -> HandlerResult<HttpResponse> {
+async fn run_spec(data: Data<AppState>) -> HttpResponse {
     let run = oneshot::channel();
-    data.send(AppCommand::RunStatus(run.0).into())?;
-    Ok(HttpResponse::Ok().json(run.1.await?))
+    data.send(AppCommand::RunStatus(run.0).into()).unwrap();
+    HttpResponse::Ok().json(run.1.await.unwrap())
+}
+
+#[get("/news")]
+#[tracing::instrument(skip(data))]
+async fn interval_news(data: Data<AppState>) -> HttpResponse {
+    let news = oneshot::channel();
+    data.send(AppCommand::News(news.0).into()).unwrap();
+    HttpResponse::Ok().json(news.1.await.unwrap())
 }
 
 impl<S> State<S> {
@@ -99,6 +122,7 @@ impl<S> State<S> {
             activities: Default::default(),
             ready_number: expect_number,
             assemble_time: Default::default(),
+            shutdown: false,
             shared,
         }
     }
@@ -106,10 +130,7 @@ impl<S> State<S> {
     pub fn spawn<P>(
         expect_number: usize,
         shared: S,
-    ) -> (
-        JoinHandle<anyhow::Result<Self>>,
-        impl FnOnce(&mut ServiceConfig) + Clone,
-    )
+    ) -> (JoinHandle<Self>, impl FnOnce(&mut ServiceConfig) + Clone)
     where
         S: Send + Serialize + Clone + 'static,
         P: Serialize,
@@ -117,8 +138,8 @@ impl<S> State<S> {
         let mut state = Self::new(expect_number, shared);
         let messages = mpsc::unbounded_channel();
         let handle = spawn(async move {
-            state.run::<P>(messages.1).await?;
-            Ok(state)
+            state.run::<P>(messages.1).await;
+            state
         });
         (handle, |config| Self::config(config, messages.0))
     }
@@ -128,13 +149,12 @@ impl<S> State<S> {
             .app_data(Data::new(app_data))
             .service(join)
             .service(leave)
-            .service(run_status);
+            .service(shutdown)
+            .service(run_spec)
+            .service(interval_news);
     }
 
-    async fn run<P>(
-        &mut self,
-        mut messages: mpsc::UnboundedReceiver<StateMessage>,
-    ) -> anyhow::Result<()>
+    async fn run<P>(&mut self, mut messages: mpsc::UnboundedReceiver<StateMessage>)
     where
         S: Serialize + Clone,
         P: Serialize,
@@ -150,14 +170,17 @@ impl<S> State<S> {
                         .insert(self.participant_id, participant.clone());
                     self.activities
                         .insert(SystemTime::now(), Activity::Join(participant));
-                    result
-                        .send(self.participant_id)
-                        .map_err(|_| anyhow!("reciver dropped"))?
+                    if result.send(self.participant_id).is_err() {
+                        break;
+                    }
                 }
                 AppCommand::Leave(participant_id) => {
                     let participant = self.participants.remove(&participant_id).unwrap();
                     self.activities
                         .insert(SystemTime::now(), Activity::Leave(participant));
+                }
+                AppCommand::Shutdown => {
+                    self.shutdown = true;
                 }
                 AppCommand::RunStatus(result) => {
                     let response = if self.participants.len() < self.ready_number {
@@ -175,12 +198,19 @@ impl<S> State<S> {
                         })
                         .unwrap()
                     };
-                    result
-                        .send(response)
-                        .map_err(|_| anyhow!("reciver dropped"))?
+                    if result.send(response).is_err() {
+                        break;
+                    }
+                }
+                AppCommand::News(result) => {
+                    let news = News {
+                        shutdown: self.shutdown,
+                    };
+                    if result.send(news).is_err() {
+                        break;
+                    }
                 }
             }
         }
-        Ok(())
     }
 }

@@ -25,6 +25,8 @@ pub async fn shutdown_tracing() {
         .unwrap()
 }
 
+pub type LocalResult<T> = Result<T, Box<dyn std::error::Error>>;
+
 #[derive(Debug)]
 pub struct HandlerError(anyhow::Error);
 
