@@ -1,9 +1,4 @@
-use std::{
-    error::Error,
-    future::Future,
-    path::PathBuf,
-    time::{Duration, SystemTime},
-};
+use std::{error::Error, future::Future, path::PathBuf, time::Duration};
 
 use actix_web::{http::StatusCode, App, HttpServer};
 use actix_web_opentelemetry::ClientExt;
@@ -54,7 +49,6 @@ struct Shared {
 
 struct ReadyRun {
     participants: Vec<Participant>,
-    assemble_time: SystemTime,
     shared: Shared,
     join_id: u32,
 }
@@ -132,16 +126,6 @@ async fn main() -> LocalResult<()> {
 
     let (app_handle, configuration) = app::State::spawn(peer, signing_key, peer_store, chunk_store);
 
-    println!("READY");
-    let assemble_time = run.assemble_time;
-    let user_task = spawn(async move {
-        let wait_duration =
-            Duration::from_millis(100).saturating_sub(assemble_time.elapsed().unwrap_or_default());
-        sleep(wait_duration).await;
-
-        //
-    });
-
     let server = HttpServer::new(move || {
         App::new()
             .wrap(actix_web_opentelemetry::RequestTracing::new())
@@ -154,13 +138,11 @@ async fn main() -> LocalResult<()> {
         shutdown.1.recv().await;
         server_handle.stop(true).await;
     });
+
+    println!("READY");
     server.await?;
 
     app_handle.await?.map_err(|err| err as Box<dyn Error>)?;
-    if !user_task.is_finished() {
-        println!("WARN user task not finished");
-        user_task.abort();
-    }
     tokio::fs::remove_dir_all(&chunk_path).await?;
     leave_network(&cli, run.join_id).await?;
     common::shutdown_tracing().await;
@@ -196,12 +178,11 @@ async fn join_network(peer: &Peer, cli: &Cli) -> LocalResult<ReadyRun> {
             Run::Retry(interval) => retry_interval = interval,
             Run::Ready {
                 participants,
-                assemble_time,
+                assemble_time: _,
                 shared,
             } => {
                 break ReadyRun {
                     participants,
-                    assemble_time,
                     shared,
                     join_id,
                 }

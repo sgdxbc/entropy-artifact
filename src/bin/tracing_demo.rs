@@ -1,39 +1,52 @@
-use std::time::Duration;
+use std::error::Error;
 
+use actix_web::web::{Bytes, Path};
+use actix_web::{get, post, App, HttpServer};
+use actix_web_opentelemetry::ClientExt;
 use opentelemetry::global;
-use opentelemetry::trace::TraceError;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
+#[post("/client-request/{path}")]
+async fn client_request(path: Path<String>) -> Bytes {
+    awc::Client::new()
+        .get(format!("http://127.0.0.1:8080/{path}"))
+        .trace_request()
+        .send()
+        .await
+        .unwrap()
+        .body()
+        .await
+        .unwrap()
+}
+
+#[get("/{path}")]
+async fn echo(path: Path<String>) -> String {
+    format!("OK {path}")
+}
+
 #[tokio::main]
-async fn main() -> Result<(), TraceError> {
+async fn main() -> Result<(), Box<dyn Error>> {
     global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
     let tracer = opentelemetry_jaeger::new_agent_pipeline()
-        // .install_simple()?;
         .with_service_name("tracing_demo")
         .install_batch(opentelemetry::runtime::Tokio)?;
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().json())
         .with(EnvFilter::from_default_env())
         .with(tracing_opentelemetry::layer().with_tracer(tracer))
         .init();
 
-    let span = tracing::info_span!("do some work");
-    let enter = span.enter();
-    println!("in span #1");
-    drop(enter);
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let enter = span.enter();
-    println!("in span #2");
-    drop(enter);
-    drop(span);
-
-    // tracer.in_span("doing_work", |cx| {
-    //     // Traced app logic here...
-    // });
+    HttpServer::new(move || {
+        App::new()
+            .wrap(actix_web_opentelemetry::RequestTracing::new())
+            .service(client_request)
+            .service(echo)
+    })
+    .bind(("127.0.0.1", 8080))?
+    .run()
+    .await?;
 
     global::shutdown_tracer_provider(); // sending remaining spans
 
