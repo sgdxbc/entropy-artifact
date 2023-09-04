@@ -1,7 +1,3 @@
-use std::fmt::Display;
-
-use actix_web::http::StatusCode;
-use actix_web::{HttpResponse, ResponseError};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -25,9 +21,8 @@ pub async fn shutdown_tracing() {
         .unwrap()
 }
 
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-pub type LocalResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
+// i know there's `hex` and `itertools` in the wild, just want to avoid
+// introduce util dependencies for single use case
 pub fn hex_string(bytes: &[u8]) -> String {
     bytes
         .iter()

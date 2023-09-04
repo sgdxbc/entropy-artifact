@@ -1,10 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
+    time::SystemTime,
 };
 
 use actix_web::{
-    post,
+    get, post,
     web::{Bytes, Data, Json, Path, ServiceConfig},
     HttpResponse,
 };
@@ -15,38 +16,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
     spawn,
-    sync::mpsc,
+    sync::{mpsc, oneshot},
     task::{spawn_local, JoinHandle},
 };
 use tracing::Span;
 
 use crate::{
     chunk::{self, ChunkKey},
-    common::{hex_string, Result},
+    common::hex_string,
     peer::{self, Peer},
 };
-
-// don't know why i mix the uploading/repairing code path = =
-// maybe because i did it last time...
-//
-// uploading message flow
-// 1. uploader send Invite{members = [uploader]} to initial group members
-// 2. initial group members send QueryFragment{index = Some(i)} to uploader,
-//    uploader "reply" with Fragment(i)
-// 3. after pushing fragments to $k$ members, uploader send
-//    Ping{index = None, members} to them
-//
-// repairing message flow
-// 1. repairer send Invite{members} to the invited member
-// 2. invited member send QueryFragment{index = Some(i)} to members in Invite,
-//    members "reply" with Fragment(j) where j is member's local fragment index
-// 3. after $k$ members pushing fragments, invited member recover its local
-//    fragment and send Ping{index = Some(i), members} to members in Invite
-//
-// downloading message flow
-// 1. downloader send QueryFragment{index = None} to group members, members
-//    "reply" with Fragment(i)
-// 2. after $k$ members pushing fragment, downloader recover the chunk
 
 fn fragment_id(key: &ChunkKey, index: u32) -> [u8; 32] {
     Sha256::new()
@@ -65,10 +44,13 @@ fn parse_key(s: &str) -> ChunkKey {
 }
 
 enum AppCommand {
-    Invite(ChunkKey, u32, InviteMessage),
-    QueryFragment(ChunkKey, QueryFragmentMessage),
-    AcceptFragment(ChunkKey, u32, Bytes),
-    Ping(ChunkKey, u32, PingMessage),
+    UploadInvite(ChunkKey, u32, Peer),
+    UploadQueryFragment(ChunkKey, ChunkMember, oneshot::Sender<Vec<u8>>),
+    UploadComplete(ChunkKey, Vec<ChunkMember>),
+    DownloadQueryFragment(ChunkKey, Peer, oneshot::Sender<Vec<u8>>),
+    RepairInvite(ChunkKey, u32, Vec<ChunkMember>),
+    RepairQueryFragment(ChunkKey, ChunkMember, oneshot::Sender<Vec<u8>>),
+    Ping(ChunkKey, PingMessage),
 
     RecoverFinish(ChunkKey, Vec<u8>),
 }
@@ -90,75 +72,99 @@ impl From<AppCommand> for StateMessage {
 type AppState = mpsc::UnboundedSender<StateMessage>;
 pub type ShutdownServer = mpsc::UnboundedSender<()>;
 
-#[derive(Debug, Serialize, Deserialize)]
-struct InviteMessage {
-    members: Vec<ChunkMember>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChunkMember {
+    peer: Peer,
     index: u32,
-    peer: Peer,
-    proof: (),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct QueryFragmentMessage {
-    peer: Peer,
-    index: Option<u32>, // sender is egligible to store, or `None` for GET operation
     proof: (),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PingMessage {
     members: Vec<ChunkMember>,
-    index: Option<u32>,
-    nonce: [u8; 32],
+    index: u32,
+    time: SystemTime,
     signature: ed25519_dalek::Signature,
 }
 
-#[post("/invite/{key}/{index}")]
-async fn invite(
+#[post("/upload/invite/{key}/{index}")]
+async fn upload_invite(
     data: Data<AppState>,
     path: Path<(String, u32)>,
-    message: Json<InviteMessage>,
+    message: Json<Peer>,
 ) -> HttpResponse {
-    data.send(AppCommand::Invite(parse_key(&path.0), path.1, message.0).into())
+    data.send(AppCommand::UploadInvite(parse_key(&path.0), path.1, message.0).into())
         .unwrap();
     HttpResponse::Ok().finish()
 }
 
-#[post("/query-fragment/{key}")]
-async fn query_fragment(
+#[post("/upload/query-fragment/{key}")]
+async fn upload_query_fragment(
     data: Data<AppState>,
     path: Path<String>,
-    message: Json<QueryFragmentMessage>,
+    message: Json<ChunkMember>,
 ) -> HttpResponse {
-    data.send(AppCommand::QueryFragment(parse_key(&path), message.0).into())
+    let result = oneshot::channel();
+    data.send(AppCommand::UploadQueryFragment(parse_key(&path), message.0, result.0).into())
         .unwrap();
-    HttpResponse::Ok().finish()
+    HttpResponse::Ok().body(result.1.await.unwrap())
 }
 
-#[post("/fragment/{key}/{index}")]
-async fn accept_fragment(
+#[post("/upload/complete/{key}")]
+async fn upload_complete(
     data: Data<AppState>,
-    path: Path<(String, u32)>,
-    fragment: Bytes,
+    path: Path<String>,
+    message: Json<Vec<ChunkMember>>,
 ) -> HttpResponse {
-    data.send(AppCommand::AcceptFragment(parse_key(&path.0), path.1, fragment).into())
+    data.send(AppCommand::UploadComplete(parse_key(&path), message.0).into())
         .unwrap();
     HttpResponse::Ok().finish()
 }
 
-#[post("/ping/{key}/{index}")]
+#[get("/download/query-fragment/{key}")]
+async fn download_query_fragment(
+    data: Data<AppState>,
+    path: Path<String>,
+    message: Json<Peer>,
+) -> HttpResponse {
+    let result = oneshot::channel();
+    data.send(AppCommand::DownloadQueryFragment(parse_key(&path), message.0, result.0).into())
+        .unwrap();
+    HttpResponse::Ok().body(result.1.await.unwrap())
+}
+
+#[post("/ping/{key}")]
 async fn ping(
     data: Data<AppState>,
-    path: Path<(String, u32)>,
+    path: Path<String>,
     message: Json<PingMessage>,
 ) -> HttpResponse {
-    data.send(AppCommand::Ping(parse_key(&path.0), path.1, message.0).into())
+    data.send(AppCommand::Ping(parse_key(&path), message.0).into())
         .unwrap();
     HttpResponse::Ok().finish()
+}
+
+#[post("/repair/invite/{key}/{index}")]
+async fn repair_invite(
+    data: Data<AppState>,
+    path: Path<(String, u32)>,
+    message: Json<Vec<ChunkMember>>,
+) -> HttpResponse {
+    data.send(AppCommand::RepairInvite(parse_key(&path.0), path.1, message.0).into())
+        .unwrap();
+    HttpResponse::Ok().finish()
+}
+
+#[post("/repair/query-fragment/{key}")]
+async fn repair_query_fragment(
+    data: Data<AppState>,
+    path: Path<String>,
+    message: Json<ChunkMember>,
+) -> HttpResponse {
+    let result = oneshot::channel();
+    data.send(AppCommand::RepairQueryFragment(parse_key(&path), message.0, result.0).into())
+        .unwrap();
+    HttpResponse::Ok().body(result.1.await.unwrap())
 }
 
 pub struct State {
@@ -184,10 +190,7 @@ impl State {
         local_secret: SigningKey,
         peer_store: peer::Store,
         chunk_store: chunk::Store,
-    ) -> (
-        JoinHandle<Result<Self>>,
-        impl FnOnce(&mut ServiceConfig) + Clone,
-    ) {
+    ) -> (JoinHandle<Self>, impl FnOnce(&mut ServiceConfig) + Clone) {
         let messages = mpsc::unbounded_channel();
         let mut state = State {
             local_peer,
@@ -198,44 +201,35 @@ impl State {
             messages: messages.0.downgrade(),
         };
         let handle = spawn(async move {
-            state.run(messages.1).await?;
-            Ok(state)
+            state.run(messages.1).await;
+            state
         });
         (handle, |config| Self::config(config, messages.0))
     }
 
-    async fn run(&mut self, mut messages: mpsc::UnboundedReceiver<StateMessage>) -> Result<()> {
+    async fn run(&mut self, mut messages: mpsc::UnboundedReceiver<StateMessage>) {
         while let Some(message) = messages.recv().await {
             match message.command {
-                AppCommand::Invite(key, index, message) => self.handle_invite(&key, index, message),
-                AppCommand::QueryFragment(key, message) => {
-                    self.handle_query_fragment(&key, message)
-                }
-                AppCommand::AcceptFragment(key, index, fragment) => {
-                    self.handle_accept_fragment(&key, index, fragment)
-                }
-                AppCommand::RecoverFinish(key, fragment) => {
-                    self.handle_recover_finish(&key, fragment)
-                }
                 _ => todo!(),
             }
         }
-        Ok(())
     }
 
     fn config(config: &mut ServiceConfig, app_data: AppState) {
         config
             .app_data(Data::new(app_data))
-            .service(invite)
-            .service(query_fragment)
-            .service(accept_fragment)
+            .service(upload_invite)
+            .service(upload_query_fragment)
+            .service(download_query_fragment)
+            .service(repair_invite)
+            .service(repair_query_fragment)
             .service(ping);
     }
 
-    fn handle_invite(&mut self, key: &ChunkKey, index: u32, message: InviteMessage) {
+    fn handle_repair_invite(&mut self, key: &ChunkKey, index: u32, message: Vec<ChunkMember>) {
         let chunk_state = self.chunk_states.entry(*key).or_insert(ChunkState {
             local_index: index,
-            members: message.members.clone(),
+            members: message.clone(),
             pinged: Default::default(),
             indexes: 0..1, // TODO
             fragment_present: false,
@@ -245,28 +239,41 @@ impl State {
         }
 
         // TODO generate proof
+        let member = ChunkMember {
+            peer: self.local_peer.clone(),
+            index,
+            proof: (),
+        };
+
         self.chunk_store.recover_chunk(key);
         let key = hex_string(key);
-        for member in message.members {
+        for member in message {
             // TODO skip query for already-have fragments
-            let local_peer = self.local_peer.clone();
+            let member = member.clone();
             let key = key.clone();
             spawn_local(async move {
-                Client::new()
-                    .post(format!("http://{}/query-fragment/{key}", member.peer.uri))
+                let fragment = Client::new()
+                    .post(format!(
+                        "http://{}/repair/query-fragment/{key}",
+                        member.peer.uri
+                    ))
                     .trace_request()
-                    .send_json(&QueryFragmentMessage {
-                        peer: local_peer,
-                        index: Some(index),
-                        proof: (),
-                    })
-                    .await
-                    .unwrap();
+                    .send_json(&member)
+                    .await?
+                    .body()
+                    .await?;
+                //
+                Result::<_, Box<dyn std::error::Error>>::Ok(())
             });
         }
     }
 
-    fn handle_query_fragment(&mut self, key: &ChunkKey, message: QueryFragmentMessage) {
+    fn handle_repair_query_fragment(
+        &mut self,
+        key: &ChunkKey,
+        message: ChunkMember,
+        result: oneshot::Sender<Vec<u8>>,
+    ) {
         // TODO verify proof
         let Some(chunk_state) = self.chunk_states.get(key) else {
             //
@@ -276,19 +283,8 @@ impl State {
         let index = chunk_state.local_index;
         let fragment = self.chunk_store.get_fragment(key, index);
         let key = hex_string(key);
-        spawn_local(async move {
-            let Ok(fragment) = fragment.await else {
-                //
-                return;
-            };
-            let _ = Client::new()
-                .post(format!(
-                    "http://{}/fragment/{key}/{index}",
-                    message.peer.uri
-                ))
-                .trace_request()
-                .send_body(fragment)
-                .await;
+        spawn(async move {
+            let _ = result.send(fragment.await);
         });
     }
 
@@ -313,7 +309,7 @@ impl State {
             let messages = self.messages.clone();
             let key = *key;
             spawn(async move {
-                let Ok(fragment) = task.await else {
+                let fragment = task.await else {
                     //
                     return;
                 };
@@ -333,14 +329,10 @@ impl State {
         self.chunk_store.finish_recover(key);
         let chunk_state = self.chunk_states.get_mut(key).unwrap();
         chunk_state.fragment_present = true;
-        let task = self
-            .chunk_store
-            .put_fragment(key, chunk_state.local_index, fragment);
-        spawn(async move {
-            if task.await.is_err() {
-                //
-            }
-        });
+        spawn(
+            self.chunk_store
+                .put_fragment(key, chunk_state.local_index, fragment),
+        );
     }
 
     fn handle_ping(&mut self, key: &ChunkKey, index: u32, message: PingMessage) {}

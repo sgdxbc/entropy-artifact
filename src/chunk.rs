@@ -6,10 +6,10 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
-use tokio::{fs, task::spawn_blocking};
+use tokio::fs;
 use wirehair::{WirehairDecoder, WirehairEncoder};
 
-use crate::common::{hex_string, Result};
+use crate::common::hex_string;
 
 pub struct Store {
     path: PathBuf,
@@ -47,16 +47,13 @@ impl Store {
         &mut self,
         key: &ChunkKey,
         index: u32,
-    ) -> impl Future<Output = Result<Option<Vec<u8>>>> {
+    ) -> impl Future<Output = Vec<u8>> {
         let encoder = self.upload_chunks[key].clone();
         let fragment_size = self.fragment_size;
         async move {
-            spawn_blocking(move || {
-                let mut fragment = vec![0; fragment_size as usize];
-                encoder.encode(index, &mut fragment)?;
-                Ok(Some(fragment))
-            })
-            .await?
+            let mut fragment = vec![0; fragment_size as usize];
+            encoder.encode(index, &mut fragment).unwrap();
+            fragment
         }
     }
 
@@ -65,8 +62,6 @@ impl Store {
     }
 
     fn chunk_dir(&self, key: &ChunkKey) -> PathBuf {
-        // i know there's `hex` and `itertools` in the wild, just want to avoid
-        // introduce util dependencies for single use case
         self.path.join(hex_string(&key[..]))
     }
 
@@ -75,23 +70,20 @@ impl Store {
         key: &ChunkKey,
         index: u32,
         fragment: Vec<u8>,
-    ) -> impl Future<Output = Result<()>> {
+    ) -> impl Future<Output = ()> {
         assert_eq!(fragment.len(), self.fragment_size as usize);
         let chunk_dir = self.chunk_dir(key);
         async move {
-            fs::create_dir(&chunk_dir).await?;
-            fs::write(chunk_dir.join(format!("{index}")), fragment).await?;
-            Ok(())
+            fs::create_dir(&chunk_dir).await.unwrap();
+            fs::write(chunk_dir.join(format!("{index}")), fragment)
+                .await
+                .unwrap();
         }
     }
 
-    pub fn get_fragment(
-        &self,
-        key: &ChunkKey,
-        index: u32,
-    ) -> impl Future<Output = Result<Vec<u8>>> {
+    pub fn get_fragment(&self, key: &ChunkKey, index: u32) -> impl Future<Output = Vec<u8>> {
         let chunk_dir = self.chunk_dir(key);
-        async move { Ok(fs::read(chunk_dir.join(format!("{index}"))).await?) }
+        async move { fs::read(chunk_dir.join(format!("{index}"))).await.unwrap() }
     }
 
     pub fn recover_chunk(&mut self, key: &ChunkKey) {
@@ -112,35 +104,26 @@ impl Store {
         remote_index: u32,
         remote_fragment: Vec<u8>,
         index: u32,
-    ) -> impl Future<Output = Result<Option<Vec<u8>>>> {
+    ) -> impl Future<Output = Option<Vec<u8>>> {
         assert_eq!(remote_fragment.len(), self.fragment_size as usize);
         let decoder_cell = self.recovers[key].clone();
         let fragment_size = self.fragment_size;
         async move {
-            let decoder = spawn_blocking(move || {
-                let mut decoder_cell = decoder_cell.lock().unwrap();
-                let ready = if let Some(decoder) = &mut *decoder_cell {
-                    decoder.decode(remote_index, &remote_fragment)?
-                } else {
-                    return std::result::Result::<_, wirehair::WirehairResult>::Ok(None);
-                };
-                Ok(if ready {
-                    Some(decoder_cell.take().unwrap())
-                } else {
-                    None
-                })
-            })
-            .await??;
-            Ok(decoder.map(|decoder| {
-                let mut fragment = vec![0; fragment_size as usize];
-                // assert success after `decode` returns true
-                decoder
-                    .into_encoder()
-                    .unwrap()
-                    .encode(index, &mut fragment)
-                    .unwrap();
-                fragment
-            }))
+            let mut decoder_cell = decoder_cell.lock().unwrap();
+            let Some(decoder) = &mut *decoder_cell else {
+                return None;
+            };
+            if !decoder.decode(remote_index, &remote_fragment).unwrap() {
+                return None;
+            }
+            let decoder = decoder_cell.take().unwrap();
+            let mut fragment = vec![0; fragment_size as usize];
+            decoder
+                .into_encoder()
+                .unwrap()
+                .encode(index, &mut fragment)
+                .unwrap();
+            Some(fragment)
         }
     }
 

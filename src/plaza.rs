@@ -162,7 +162,7 @@ impl<S> State<S> {
         while let Some(message) = messages.recv().await {
             // tokio::time::sleep(Duration::from_millis(100)).await;
             let _entered = info_span!(parent: &message.span, "execute command").entered();
-            match message.command {
+            let closed = match message.command {
                 AppCommand::Join(participant, result) => {
                     self.participant_id += 1;
                     assert!(self.participants.len() < self.ready_number);
@@ -170,17 +170,17 @@ impl<S> State<S> {
                         .insert(self.participant_id, participant.clone());
                     self.activities
                         .insert(SystemTime::now(), Activity::Join(participant));
-                    if result.send(self.participant_id).is_err() {
-                        break;
-                    }
+                    result.send(self.participant_id).is_err()
                 }
                 AppCommand::Leave(participant_id) => {
                     let participant = self.participants.remove(&participant_id).unwrap();
                     self.activities
                         .insert(SystemTime::now(), Activity::Leave(participant));
+                    false
                 }
                 AppCommand::Shutdown => {
                     self.shutdown = true;
+                    false
                 }
                 AppCommand::RunStatus(result) => {
                     let response = if self.participants.len() < self.ready_number {
@@ -198,18 +198,17 @@ impl<S> State<S> {
                         })
                         .unwrap()
                     };
-                    if result.send(response).is_err() {
-                        break;
-                    }
+                    result.send(response).is_err()
                 }
                 AppCommand::News(result) => {
                     let news = News {
                         shutdown: self.shutdown,
                     };
-                    if result.send(news).is_err() {
-                        break;
-                    }
+                    result.send(news).is_err()
                 }
+            };
+            if closed {
+                break;
             }
         }
     }

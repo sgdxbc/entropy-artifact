@@ -1,4 +1,4 @@
-use std::{error::Error, future::Future, path::PathBuf, time::Duration};
+use std::{future::Future, panic::panic_any, path::PathBuf, time::Duration};
 
 use actix_web::{http::StatusCode, App, HttpServer};
 use actix_web_opentelemetry::ClientExt;
@@ -16,7 +16,6 @@ use tokio::{net::TcpListener, spawn, sync::mpsc, task::spawn_local, time::sleep}
 
 use crate::{
     app::ShutdownServer,
-    common::LocalResult,
     peer::Peer,
     plaza::{News, Run},
 };
@@ -59,7 +58,7 @@ struct ReadyRun {
 }
 
 #[actix_web::main]
-async fn main() -> LocalResult<()> {
+async fn main() {
     let cli = Cli::parse();
 
     if let Some(expect_number) = cli.plaza_service {
@@ -81,22 +80,28 @@ async fn main() -> LocalResult<()> {
                 .wrap(actix_web_opentelemetry::RequestTracing::new())
                 .configure(configure.clone())
         })
-        .bind((cli.host, 8080))?
+        .bind((cli.host, 8080))
+        .unwrap()
         .run()
-        .await?;
+        .await
+        .unwrap();
 
-        state_handle.await?; // inspect returned state if necessary
+        state_handle.await.unwrap(); // inspect returned state if necessary
         common::shutdown_tracing().await;
-        return Ok(());
+        return;
     }
 
     common::setup_tracing("entropy.peer");
 
-    let listener = TcpListener::bind("0.0.0.0:0").await?;
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
     let peer = Peer {
-        uri: format!("http://{}:{}", cli.host, listener.local_addr()?.port()),
+        uri: format!(
+            "http://{}:{}",
+            cli.host,
+            listener.local_addr().unwrap().port()
+        ),
         id: Sha256::digest(verifying_key).into(),
         key: verifying_key,
     };
@@ -104,7 +109,7 @@ async fn main() -> LocalResult<()> {
     let span = opentelemetry::global::tracer("").start("join network");
     let run = join_network(&peer, &cli)
         .with_context(Context::current_with_span(span))
-        .await?;
+        .await;
 
     let mut shutdown = mpsc::unbounded_channel();
     spawn_local(poll_network(&cli, shutdown.0));
@@ -121,7 +126,7 @@ async fn main() -> LocalResult<()> {
     assert_eq!(peer_store.closest_peers(&peer.id, 1)[0].id, peer.id);
 
     let chunk_path = run.shared.chunk_root.join(common::hex_string(&peer.id));
-    tokio::fs::create_dir_all(&chunk_path).await?;
+    tokio::fs::create_dir_all(&chunk_path).await.unwrap();
     let chunk_store = chunk::Store::new(
         chunk_path.clone(),
         run.shared.fragment_size,
@@ -136,7 +141,8 @@ async fn main() -> LocalResult<()> {
             .wrap(actix_web_opentelemetry::RequestTracing::new())
             .configure(configuration.clone())
     })
-    .listen(listener.into_std()?)?
+    .listen(listener.into_std().unwrap())
+    .unwrap()
     .run();
     let server_handle = server.handle();
     spawn(async move {
@@ -145,29 +151,30 @@ async fn main() -> LocalResult<()> {
     });
 
     println!("READY");
-    server.await?;
+    server.await.unwrap();
 
-    app_handle.await?.map_err(|err| err as Box<dyn Error>)?;
-    tokio::fs::remove_dir_all(&chunk_path).await?;
-    leave_network(&cli, run.join_id).await?;
+    app_handle.await.unwrap();
+    tokio::fs::remove_dir_all(&chunk_path).await.unwrap();
+    leave_network(&cli, run.join_id).await;
     common::shutdown_tracing().await;
-    Ok(())
 }
 
 // #[instrument(skip_all, fields(peer = common::hex_string(&peer.id)))]
-async fn join_network(peer: &Peer, cli: &Cli) -> LocalResult<ReadyRun> {
+async fn join_network(peer: &Peer, cli: &Cli) -> ReadyRun {
     let client = Client::new();
     let mut response = client
         .post(format!("http://{}:8080/join", cli.plaza.as_ref().unwrap()))
         .trace_request()
         .send_json(&Participant::Peer(peer.clone()))
-        .await?;
+        .await
+        .unwrap();
     if response.status() != StatusCode::OK {
-        return Err(String::from_utf8(response.body().await?.to_vec())?.into());
+        panic_any(String::from_utf8(response.body().await.unwrap().to_vec()).unwrap());
     }
-    let join_id = response.json::<serde_json::Value>().await?["id"]
+    let join_id = response.json::<serde_json::Value>().await.unwrap()["id"]
         .to_string()
-        .parse()?;
+        .parse()
+        .unwrap();
 
     let mut retry_interval = Duration::ZERO;
     let run = loop {
@@ -176,9 +183,11 @@ async fn join_network(peer: &Peer, cli: &Cli) -> LocalResult<ReadyRun> {
             .get(format!("http://{}:8080/run", cli.plaza.as_ref().unwrap()))
             .trace_request()
             .send()
-            .await?
+            .await
+            .unwrap()
             .json::<plaza::Run<Participant, Shared>>()
-            .await?
+            .await
+            .unwrap()
         {
             Run::Retry(interval) => retry_interval = interval,
             Run::Ready {
@@ -195,11 +204,10 @@ async fn join_network(peer: &Peer, cli: &Cli) -> LocalResult<ReadyRun> {
         }
     };
     // println!("{response:?}");
-
-    Ok(run)
+    run
 }
 
-async fn leave_network(cli: &Cli, join_id: u32) -> LocalResult<()> {
+async fn leave_network(cli: &Cli, join_id: u32) {
     let client = Client::new();
     let response = client
         .post(format!(
@@ -208,12 +216,12 @@ async fn leave_network(cli: &Cli, join_id: u32) -> LocalResult<()> {
         ))
         .trace_request()
         .send()
-        .await?;
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    Ok(())
 }
 
-fn poll_network(cli: &Cli, shutdown: ShutdownServer) -> impl Future<Output = LocalResult<()>> {
+fn poll_network(cli: &Cli, shutdown: ShutdownServer) -> impl Future<Output = ()> {
     let endpoint = format!("http://{}:8080/news", cli.plaza.as_ref().unwrap());
     async move {
         let client = Client::new();
@@ -223,12 +231,14 @@ fn poll_network(cli: &Cli, shutdown: ShutdownServer) -> impl Future<Output = Loc
                 .get(&endpoint)
                 .trace_request()
                 .send()
-                .await?
+                .await
+                .unwrap()
                 .json::<News>()
-                .await?;
+                .await
+                .unwrap();
             if news.shutdown {
-                shutdown.send(()).map_err(|_| "receiver dropped")?;
-                break Ok(());
+                shutdown.send(()).unwrap();
+                break;
             }
         }
     }

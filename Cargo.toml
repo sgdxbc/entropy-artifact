@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 default-run = "simple-entropy"
 
+[profile.artifact]
+inherits = "release"
+panic = "abort"
+strip = true
+lto = true
+codegen-units = 1
+
 [dependencies]
 actix-web = "4.3.1"
 actix-web-opentelemetry = { version = "0.15.0", features = ["awc"] }
