@@ -67,11 +67,11 @@ async fn main() {
         let (state_handle, configure) = plaza::State::spawn::<Participant>(
             expect_number,
             Shared {
-                fragment_size: 1024,
-                inner_k: 32,
-                inner_n: 80,
-                outer_k: 8,
-                outer_n: 10,
+                fragment_size: 64,
+                inner_k: 2,
+                inner_n: 2,
+                outer_k: 2,
+                outer_n: 2,
                 chunk_root: "/local/cowsay/_entropy_chunk".into(),
             },
         );
@@ -172,7 +172,7 @@ async fn main() {
 async fn join_network(peer: &Peer, cli: &Cli) -> ReadyRun {
     let client = Client::new();
     let mut response = client
-        .post(format!("http://{}:8080/join", cli.plaza.as_ref().unwrap()))
+        .post(format!("{}/join", cli.plaza.as_ref().unwrap()))
         .trace_request()
         .send_json(&Participant::Peer(peer.clone()))
         .await
@@ -189,7 +189,7 @@ async fn join_network(peer: &Peer, cli: &Cli) -> ReadyRun {
     loop {
         sleep(retry_interval).await;
         match client
-            .get(format!("http://{}:8080/run", cli.plaza.as_ref().unwrap()))
+            .get(format!("{}/run", cli.plaza.as_ref().unwrap()))
             .trace_request()
             .send()
             .await
@@ -219,10 +219,7 @@ async fn join_network(peer: &Peer, cli: &Cli) -> ReadyRun {
 async fn leave_network(cli: &Cli, join_id: u32) {
     let client = Client::new();
     let response = client
-        .post(format!(
-            "http://{}:8080/leave/{join_id}",
-            cli.plaza.as_ref().unwrap()
-        ))
+        .post(format!("{}/leave/{join_id}", cli.plaza.as_ref().unwrap()))
         .trace_request()
         .send()
         .await
@@ -231,7 +228,7 @@ async fn leave_network(cli: &Cli, join_id: u32) {
 }
 
 fn poll_network(cli: &Cli, shutdown: ShutdownServer) -> impl Future<Output = ()> {
-    let endpoint = format!("http://{}:8080/news", cli.plaza.as_ref().unwrap());
+    let endpoint = format!("{}/news", cli.plaza.as_ref().unwrap());
     async move {
         let client = Client::new();
         loop {

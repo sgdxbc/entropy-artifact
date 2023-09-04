@@ -28,9 +28,14 @@ Get a list of all peer URI's
 $ curl http://<PLAZE_HOST_NAME>:8080/run | jq -r .Ready.participants[].Peer.uri
 ```
 
-Perform a PUT benchmark on a peer (not implemented yet)
+Perform a PUT benchmark on a peer
 ```
 $ curl -X POST http://<PEER_URI>/benchmark/put
+```
+
+Poll benchmark status
+```
+$ curl http://<PEER_URI>/benchmark/put
 ```
 
 Shutdown peers
