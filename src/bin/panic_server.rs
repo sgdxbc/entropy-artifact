@@ -1,5 +1,10 @@
+use std::panic;
+
 use actix_web::{get, post, App, HttpResponse, HttpServer};
-use opentelemetry::global::{set_text_map_propagator, shutdown_tracer_provider};
+use opentelemetry::{
+    global::{set_text_map_propagator, shutdown_tracer_provider},
+    trace::{get_active_span, Status},
+};
 use tokio::task::spawn_blocking;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -21,6 +26,18 @@ async fn main() {
         .with_service_name("panic_server")
         .install_batch(opentelemetry::runtime::Tokio)
         .unwrap();
+
+    let hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        get_active_span(|span| {
+            // span.add_event("panic", vec![KeyValue::new("display", info.to_string())]);
+            span.set_status(Status::error(info.to_string()));
+            span.end();
+        });
+        println!("shutdown tracer provider");
+        shutdown_tracer_provider();
+        hook(info)
+    }));
 
     tracing_subscriber::registry()
         // .with(tracing_subscriber::fmt::layer().json())

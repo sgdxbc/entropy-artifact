@@ -4,17 +4,22 @@ use actix_web::{http::StatusCode, App, HttpServer};
 use actix_web_opentelemetry::ClientExt;
 use awc::Client;
 use clap::Parser;
-use common::LocalResult;
 use ed25519_dalek::SigningKey;
-use opentelemetry::trace::Tracer;
-use plaza::{News, Run};
+use opentelemetry::{
+    trace::{FutureExt, TraceContextExt, Tracer},
+    Context,
+};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{net::TcpListener, spawn, sync::mpsc, task::spawn_local, time::sleep};
 
-use crate::app::ShutdownServer;
-use crate::peer::Peer;
+use crate::{
+    app::ShutdownServer,
+    common::LocalResult,
+    peer::Peer,
+    plaza::{News, Run},
+};
 
 mod app;
 mod chunk;
@@ -58,7 +63,7 @@ async fn main() -> LocalResult<()> {
     let cli = Cli::parse();
 
     if let Some(expect_number) = cli.plaza_service {
-        common::setup_tracing("entropy.meeting-point");
+        common::setup_tracing("entropy.plaza");
 
         let (state_handle, configure) = plaza::State::spawn::<Participant>(
             expect_number,
@@ -97,9 +102,9 @@ async fn main() -> LocalResult<()> {
     };
 
     let span = opentelemetry::global::tracer("").start("join network");
-    let active = opentelemetry::trace::mark_span_as_active(span);
-    let run = join_network(&peer, &cli).await?;
-    drop(active);
+    let run = join_network(&peer, &cli)
+        .with_context(Context::current_with_span(span))
+        .await?;
 
     let mut shutdown = mpsc::unbounded_channel();
     spawn_local(poll_network(&cli, shutdown.0));
