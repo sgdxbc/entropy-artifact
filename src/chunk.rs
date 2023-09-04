@@ -11,6 +11,7 @@ use wirehair::{WirehairDecoder, WirehairEncoder};
 
 use crate::common::hex_string;
 
+#[derive(Debug)]
 pub struct Store {
     path: PathBuf,
     fragment_size: u32,

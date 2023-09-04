@@ -11,6 +11,7 @@ pub struct Peer {
     pub uri: String,
 }
 
+#[derive(Debug)]
 pub struct Store {
     peers: Vec<Peer>,
 }

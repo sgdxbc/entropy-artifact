@@ -19,7 +19,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::{spawn_local, JoinHandle},
 };
-use tracing::Span;
+use tracing::{info_span, Instrument, Span};
 
 use crate::{
     chunk::{self, ChunkKey},
@@ -44,6 +44,11 @@ fn parse_key(s: &str) -> ChunkKey {
 }
 
 enum AppCommand {
+    Put,
+    PutStatus(oneshot::Sender<PutState>),
+    Get(ChunkKey),
+    GetStatus(oneshot::Sender<()>),
+
     UploadInvite(ChunkKey, u32, Peer),
     UploadQueryFragment(ChunkKey, ChunkMember, oneshot::Sender<Vec<u8>>),
     UploadComplete(ChunkKey, Vec<ChunkMember>),
@@ -52,7 +57,10 @@ enum AppCommand {
     RepairQueryFragment(ChunkKey, ChunkMember, oneshot::Sender<Vec<u8>>),
     Ping(ChunkKey, PingMessage),
 
+    AcceptUploadFragment(ChunkKey, Bytes),
+    AcceptFragment(ChunkKey, u32, Bytes),
     RecoverFinish(ChunkKey, Vec<u8>),
+    UploadFinish(ChunkKey),
 }
 
 struct StateMessage {
@@ -167,21 +175,53 @@ async fn repair_query_fragment(
     HttpResponse::Ok().body(result.1.await.unwrap())
 }
 
+#[post("/benchmark/put")]
+async fn benchmark_put(data: Data<AppState>) -> HttpResponse {
+    data.send(AppCommand::Put.into()).unwrap();
+    HttpResponse::Ok().finish()
+}
+
+#[get("/benchmark/put")]
+async fn benchmark_put_status(data: Data<AppState>) -> HttpResponse {
+    let result = oneshot::channel();
+    data.send(AppCommand::PutStatus(result.0).into()).unwrap();
+    HttpResponse::Ok().json(result.1.await.unwrap())
+}
+
+#[derive(Debug)]
 pub struct State {
     local_peer: Peer,
     local_secret: SigningKey,
+
     peer_store: peer::Store,
     chunk_store: chunk::Store,
+
     chunk_states: HashMap<ChunkKey, ChunkState>,
+    put_state: Option<PutState>,
+    put_uploads: HashMap<ChunkKey, UploadChunkState>,
+
     messages: mpsc::WeakUnboundedSender<StateMessage>,
 }
 
+#[derive(Debug)]
 struct ChunkState {
     local_index: u32,
     members: Vec<ChunkMember>,
     pinged: HashSet<u32>,
     indexes: Range<u32>,
     fragment_present: bool,
+}
+
+#[derive(Debug)]
+struct UploadChunkState {
+    members: Vec<ChunkMember>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PutState {
+    key: [u8; 32],
+    start: SystemTime,
+    end: Option<SystemTime>,
 }
 
 impl State {
@@ -198,6 +238,8 @@ impl State {
             peer_store,
             chunk_store,
             chunk_states: Default::default(),
+            put_state: None,
+            put_uploads: Default::default(),
             messages: messages.0.downgrade(),
         };
         let handle = spawn(async move {
@@ -209,7 +251,27 @@ impl State {
 
     async fn run(&mut self, mut messages: mpsc::UnboundedReceiver<StateMessage>) {
         while let Some(message) = messages.recv().await {
+            let _entered = info_span!(parent: &message.span, "execute command").entered();
             match message.command {
+                AppCommand::UploadInvite(key, index, message) => {
+                    self.handle_upload_invite(&key, index, message)
+                }
+                AppCommand::RepairInvite(key, index, message) => {
+                    self.handle_repair_invite(&key, index, message)
+                }
+                AppCommand::RepairQueryFragment(key, message, result) => {
+                    self.handle_repair_query_fragment(&key, message, result)
+                }
+                AppCommand::Ping(key, message) => self.handle_ping(&key, message),
+                AppCommand::AcceptUploadFragment(key, fragment) => {
+                    self.handle_accept_upload_fragment(&key, fragment)
+                }
+                AppCommand::AcceptFragment(key, index, fragment) => {
+                    self.handle_accept_fragment(&key, index, fragment)
+                }
+                AppCommand::RecoverFinish(key, fragment) => {
+                    self.handle_recover_finish(&key, fragment)
+                }
                 _ => todo!(),
             }
         }
@@ -223,48 +285,140 @@ impl State {
             .service(download_query_fragment)
             .service(repair_invite)
             .service(repair_query_fragment)
-            .service(ping);
+            .service(ping)
+            .service(benchmark_put)
+            .service(benchmark_put_status);
+    }
+
+    fn handle_put(&mut self) {
+        //
+    }
+
+    fn handle_put_state(&mut self, result: oneshot::Sender<PutState>) {
+        let _ = result.send(self.put_state.clone().unwrap());
+    }
+
+    fn handle_upload_invite(&mut self, key: &ChunkKey, index: u32, message: Peer) {
+        let local_member = if let Some(chunk_state) = self.chunk_states.get(key) {
+            if chunk_state.fragment_present {
+                return;
+            }
+            chunk_state
+                .members
+                .iter()
+                .find(|member| member.index == index)
+                .unwrap()
+                .clone()
+        } else {
+            let mut chunk_state = ChunkState {
+                local_index: index,
+                members: Default::default(),
+                pinged: Default::default(),
+                indexes: 0..1, // TODO
+                fragment_present: false,
+            };
+            // TODO generate proof
+            let local_member = ChunkMember {
+                peer: self.local_peer.clone(),
+                index,
+                proof: (),
+            };
+            chunk_state.members.push(local_member.clone());
+            self.chunk_states.insert(*key, chunk_state);
+            local_member
+        };
+
+        let hex_key = hex_string(key);
+        let messages = self.messages.clone();
+        let key = *key;
+        spawn_local(
+            async move {
+                let fragment = Client::new()
+                    .post(format!(
+                        "http://{}/repair/query-fragment/{hex_key}",
+                        message.uri
+                    ))
+                    .trace_request()
+                    .send_json(&local_member)
+                    .await
+                    .ok()?
+                    .body()
+                    .await
+                    .ok()?;
+                messages
+                    .upgrade()?
+                    .send(AppCommand::AcceptUploadFragment(key, fragment).into())
+                    .ok()?;
+                Some(())
+            }
+            .instrument(Span::current()),
+        );
+    }
+
+    fn handle_upload_query_fragment(&mut self, key: &ChunkKey, message: ChunkMember) {
+        //
     }
 
     fn handle_repair_invite(&mut self, key: &ChunkKey, index: u32, message: Vec<ChunkMember>) {
-        let chunk_state = self.chunk_states.entry(*key).or_insert(ChunkState {
-            local_index: index,
-            members: message.clone(),
-            pinged: Default::default(),
-            indexes: 0..1, // TODO
-            fragment_present: false,
-        });
-        if chunk_state.fragment_present {
-            return;
-        }
-
-        // TODO generate proof
-        let member = ChunkMember {
-            peer: self.local_peer.clone(),
-            index,
-            proof: (),
+        let local_member = if let Some(chunk_state) = self.chunk_states.get(key) {
+            if chunk_state.fragment_present {
+                return;
+            }
+            chunk_state
+                .members
+                .iter()
+                .find(|member| member.index == index)
+                .unwrap()
+                .clone()
+        } else {
+            let mut chunk_state = ChunkState {
+                local_index: index,
+                members: message.clone(),
+                pinged: Default::default(),
+                indexes: 0..1, // TODO
+                fragment_present: false,
+            };
+            // TODO generate proof
+            let local_member = ChunkMember {
+                peer: self.local_peer.clone(),
+                index,
+                proof: (),
+            };
+            chunk_state.members.push(local_member.clone());
+            self.chunk_states.insert(*key, chunk_state);
+            local_member
         };
 
         self.chunk_store.recover_chunk(key);
-        let key = hex_string(key);
+        let hex_key = hex_string(key);
         for member in message {
             // TODO skip query for already-have fragments
-            let member = member.clone();
-            let key = key.clone();
-            spawn_local(async move {
-                let fragment = Client::new()
-                    .post(format!(
-                        "http://{}/repair/query-fragment/{key}",
-                        member.peer.uri
-                    ))
-                    .trace_request()
-                    .send_json(&member)
-                    .await?
-                    .body()
-                    .await?;
-                //
-                Result::<_, Box<dyn std::error::Error>>::Ok(())
-            });
+            let local_member = local_member.clone();
+            let hex_key = hex_key.clone();
+            let messages = self.messages.clone();
+            let key = *key;
+            spawn_local(
+                async move {
+                    let fragment = Client::new()
+                        .post(format!(
+                            "http://{}/repair/query-fragment/{hex_key}",
+                            member.peer.uri
+                        ))
+                        .trace_request()
+                        .send_json(&local_member)
+                        .await
+                        .ok()?
+                        .body()
+                        .await
+                        .ok()?;
+                    messages
+                        .upgrade()?
+                        .send(AppCommand::AcceptFragment(key, member.index, fragment).into())
+                        .ok()?;
+                    Some(())
+                }
+                .instrument(Span::current()),
+            );
         }
     }
 
@@ -280,49 +434,51 @@ impl State {
             return;
         };
         assert!(chunk_state.fragment_present);
-        let index = chunk_state.local_index;
-        let fragment = self.chunk_store.get_fragment(key, index);
-        let key = hex_string(key);
-        spawn(async move {
-            let _ = result.send(fragment.await);
-        });
+        let fragment = self.chunk_store.get_fragment(key, chunk_state.local_index);
+        spawn(
+            async move {
+                let _ = result.send(fragment.await);
+            }
+            .instrument(Span::current()),
+        );
+    }
+
+    fn handle_accept_upload_fragment(&mut self, key: &ChunkKey, fragment: Bytes) {
+        let chunk_state = self.chunk_states.get_mut(key).unwrap();
+        chunk_state.fragment_present = true;
+        spawn(
+            self.chunk_store
+                .put_fragment(key, chunk_state.local_index, fragment.to_vec())
+                .instrument(Span::current()),
+        );
     }
 
     fn handle_accept_fragment(&mut self, key: &ChunkKey, index: u32, fragment: Bytes) {
-        let Some(chunk_state) = self.chunk_states.get(key) else {
-            //
-            return;
-        };
+        let chunk_state = &self.chunk_states[key];
         if chunk_state.fragment_present {
             //
             return;
         }
-        if index == chunk_state.local_index {
-            self.handle_recover_finish(key, fragment.to_vec());
-        } else {
-            let task = self.chunk_store.accept_fragment(
-                key,
-                index,
-                fragment.to_vec(),
-                chunk_state.local_index,
-            );
-            let messages = self.messages.clone();
-            let key = *key;
-            spawn(async move {
-                let fragment = task.await else {
-                    //
-                    return;
-                };
-                let Some(fragment) = fragment else {
-                    return;
-                };
-                let Some(messages) = messages.upgrade() else {
-                    //
-                    return;
-                };
-                let _ = messages.send(AppCommand::RecoverFinish(key, fragment).into());
-            });
-        }
+        assert_ne!(index, chunk_state.local_index);
+        let task = self.chunk_store.accept_fragment(
+            key,
+            index,
+            fragment.to_vec(),
+            chunk_state.local_index,
+        );
+        let messages = self.messages.clone();
+        let key = *key;
+        spawn(
+            async move {
+                let fragment = task.await?;
+                messages
+                    .upgrade()?
+                    .send(AppCommand::RecoverFinish(key, fragment).into())
+                    .ok()?;
+                Some(())
+            }
+            .instrument(Span::current()),
+        );
     }
 
     fn handle_recover_finish(&mut self, key: &ChunkKey, fragment: Vec<u8>) {
@@ -331,9 +487,10 @@ impl State {
         chunk_state.fragment_present = true;
         spawn(
             self.chunk_store
-                .put_fragment(key, chunk_state.local_index, fragment),
+                .put_fragment(key, chunk_state.local_index, fragment)
+                .instrument(Span::current()),
         );
     }
 
-    fn handle_ping(&mut self, key: &ChunkKey, index: u32, message: PingMessage) {}
+    fn handle_ping(&mut self, key: &ChunkKey, message: PingMessage) {}
 }
