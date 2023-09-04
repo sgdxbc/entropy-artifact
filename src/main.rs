@@ -131,10 +131,19 @@ async fn main() {
         chunk_path.clone(),
         run.shared.fragment_size,
         run.shared.inner_k,
-        run.shared.inner_n,
     );
 
-    let (app_handle, configuration) = app::State::spawn(peer, signing_key, peer_store, chunk_store);
+    let (app_handle, configuration) = app::State::spawn(
+        peer,
+        signing_key,
+        run.shared.fragment_size,
+        run.shared.inner_n,
+        run.shared.inner_k,
+        run.shared.outer_n,
+        run.shared.outer_k,
+        peer_store,
+        chunk_store,
+    );
 
     let server = HttpServer::new(move || {
         App::new()
@@ -177,7 +186,7 @@ async fn join_network(peer: &Peer, cli: &Cli) -> ReadyRun {
         .unwrap();
 
     let mut retry_interval = Duration::ZERO;
-    let run = loop {
+    loop {
         sleep(retry_interval).await;
         match client
             .get(format!("http://{}:8080/run", cli.plaza.as_ref().unwrap()))
@@ -202,9 +211,9 @@ async fn join_network(peer: &Peer, cli: &Cli) -> ReadyRun {
                 }
             }
         }
-    };
+    }
     // println!("{response:?}");
-    run
+    // run
 }
 
 async fn leave_network(cli: &Cli, join_id: u32) {

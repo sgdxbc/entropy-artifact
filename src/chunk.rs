@@ -16,7 +16,6 @@ pub struct Store {
     path: PathBuf,
     fragment_size: u32,
     inner_k: u32,
-    inner_n: u32,
 
     upload_chunks: HashMap<ChunkKey, Arc<WirehairEncoder>>,
     recovers: HashMap<ChunkKey, Arc<Mutex<Option<WirehairDecoder>>>>,
@@ -25,12 +24,11 @@ pub struct Store {
 pub type ChunkKey = [u8; 32];
 
 impl Store {
-    pub fn new(path: PathBuf, fragment_size: u32, inner_k: u32, inner_n: u32) -> Self {
+    pub fn new(path: PathBuf, fragment_size: u32, inner_k: u32) -> Self {
         Self {
             path,
             fragment_size,
             inner_k,
-            inner_n,
 
             upload_chunks: Default::default(),
             recovers: Default::default(),
