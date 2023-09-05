@@ -7,13 +7,16 @@ use std::{
 };
 
 use actix_web::{
-    get, post,
+    get,
+    http::StatusCode,
+    post,
     web::{Bytes, Data, Json, Path, ServiceConfig},
     HttpResponse,
 };
 use actix_web_opentelemetry::ClientExt;
 use awc::Client;
 use ed25519_dalek::SigningKey;
+use opentelemetry::trace::FutureExt;
 use rand::{thread_rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,7 +25,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::spawn_local,
 };
-use tracing::{info_span, instrument, Instrument, Span};
+use tracing::{info, info_span, instrument, Instrument, Span};
 use wirehair::WirehairEncoder;
 
 use crate::{
@@ -397,14 +400,12 @@ impl State {
             let peer = self
                 .peer_store
                 .closest_peers(&fragment_id(&key, inner_index), 1)[0];
-            if peer.id == self.local_peer.id {
-                continue; //
-            }
             let hex_key = hex_string(&key);
             let peer_uri = peer.uri.clone();
             let local_peer = self.local_peer.clone();
             spawn_local(
                 async move {
+                    info!(peer_uri, "upload invite");
                     let _ = Client::new()
                         .post(format!(
                             "{}/upload/invite/{hex_key}/{inner_index}",
@@ -433,7 +434,7 @@ impl State {
             chunk_state
                 .members
                 .iter()
-                .find(|member| member.index == index)
+                .find(|member| member.peer.id == self.local_peer.id)
                 .unwrap()
                 .clone()
         } else {
@@ -454,21 +455,29 @@ impl State {
             self.chunk_states.insert(*key, chunk_state);
             local_member
         };
+        if local_member.index != index {
+            info!(
+                local_index = local_member.index,
+                index, "reject duplicated invite"
+            );
+            return; //
+        }
 
         let hex_key = hex_string(key);
         let messages = self.messages.clone();
         let key = *key;
         spawn_local(
             async move {
-                let fragment = Client::new()
+                let mut response = Client::new()
                     .post(format!("{}/upload/query-fragment/{hex_key}", message.uri))
                     .trace_request()
                     .send_json(&local_member)
                     .await
-                    .ok()?
-                    .body()
-                    .await
                     .ok()?;
+                if response.status() == StatusCode::NOT_FOUND {
+                    return None;
+                }
+                let fragment = response.body().await.ok()?;
                 messages
                     .upgrade()?
                     .send(AppCommand::AcceptUploadFragment(key, fragment).into())
@@ -497,7 +506,7 @@ impl State {
             let _ = result.send(Some(task.await));
         });
         upload.members.push(message);
-        if upload.members.len() == self.inner_k as usize {
+        if upload.members.len() == self.inner_n as usize {
             let upload = self.put_uploads.remove(key).unwrap();
             self.get_downloads.insert(*key, upload.clone());
             let mut tasks = Vec::new();

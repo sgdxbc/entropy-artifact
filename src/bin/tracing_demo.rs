@@ -4,6 +4,7 @@ use actix_web::web::{Bytes, Path};
 use actix_web::{get, post, App, HttpServer};
 use actix_web_opentelemetry::ClientExt;
 use opentelemetry::global;
+use tracing::instrument;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -22,7 +23,9 @@ async fn client_request(path: Path<String>) -> Bytes {
 }
 
 #[get("/{path}")]
+#[instrument]
 async fn echo(path: Path<String>) -> String {
+    tracing::info!(?path, "echo");
     format!("OK {path}")
 }
 
