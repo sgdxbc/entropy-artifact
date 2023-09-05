@@ -1,35 +1,49 @@
 use std::error::Error;
 
-use actix_web::web::{Bytes, Path};
-use actix_web::{get, post, App, HttpServer};
+use actix_web::{
+    get, post,
+    web::{Bytes, Path},
+    App, HttpServer,
+};
 use actix_web_opentelemetry::ClientExt;
-use opentelemetry::global;
-use opentelemetry::trace::FutureExt;
-use tokio::task::spawn_local;
+use opentelemetry::{global, trace::FutureExt, Context};
+use tokio::{sync::mpsc, task::spawn_local};
 use tracing::instrument;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[post("/client-request/{path}")]
 #[instrument]
 async fn client_request(path: Path<String>) -> Bytes {
-    spawn_local(
-        async move {
-            awc::Client::new()
-                .get(format!("http://127.0.0.1:8080/{path}"))
-                .trace_request()
-                .send()
-                .await
-                .unwrap()
-                .body()
-                .await
-                .unwrap()
-        }
-        .with_current_context(),
-    )
-    .await
-    .unwrap()
+    let mut message = mpsc::unbounded_channel();
+    message
+        .0
+        .send((path.into_inner(), Context::current()))
+        .unwrap();
+    let mut result = mpsc::unbounded_channel();
+    spawn_local(async move {
+        let (path, context) = message.1.recv().await.unwrap();
+        let _attach = context.attach();
+        spawn_local(
+            async move {
+                result
+                    .0
+                    .send(
+                        awc::Client::new()
+                            .get(format!("http://127.0.0.1:8080/{path}"))
+                            .trace_request()
+                            .send()
+                            .await
+                            .unwrap()
+                            .body()
+                            .await
+                            .unwrap(),
+                    )
+                    .unwrap()
+            }
+            .with_current_context(),
+        )
+    });
+    result.1.recv().await.unwrap()
 }
 
 #[get("/{path}")]
