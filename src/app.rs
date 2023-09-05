@@ -312,6 +312,9 @@ impl State {
                 AppCommand::UploadQueryFragment(key, message, result) => {
                     self.handle_upload_query_fragment(&key, message, result)
                 }
+                AppCommand::UploadComplete(key, message) => {
+                    self.handle_upload_complete(&key, message)
+                }
                 AppCommand::RepairInvite(key, index, message) => {
                     self.handle_repair_invite(&key, index, message)
                 }
@@ -340,6 +343,7 @@ impl State {
             .app_data(Data::new(app_data))
             .service(upload_invite)
             .service(upload_query_fragment)
+            .service(upload_complete)
             .service(download_query_fragment)
             .service(repair_invite)
             .service(repair_query_fragment)
@@ -382,7 +386,7 @@ impl State {
                         let _ = messages.send(AppCommand::UploadChunk(chunk).into());
                     }
                 }
-                .in_current_span(),
+                .with_current_context(),
             );
         }
     }
@@ -415,7 +419,7 @@ impl State {
                         .send_json(&local_peer)
                         .await;
                 }
-                .in_current_span(),
+                .with_current_context(),
             );
         }
     }
@@ -484,7 +488,7 @@ impl State {
                     .ok()?;
                 Some(())
             }
-            .in_current_span(),
+            .with_current_context(),
         );
     }
 
@@ -522,7 +526,7 @@ impl State {
                             .send_json(&members)
                             .await;
                     }
-                    .in_current_span(),
+                    .with_current_context(),
                 ));
             }
             let messages = self.messages.clone();
@@ -536,7 +540,7 @@ impl State {
                         let _ = messages.send(AppCommand::UploadFinish(key).into());
                     }
                 }
-                .in_current_span(),
+                .with_current_context(),
             );
         }
     }
@@ -548,8 +552,15 @@ impl State {
         spawn(
             self.chunk_store
                 .put_fragment(key, chunk_state.local_index, fragment.to_vec())
-                .in_current_span(),
+                .with_current_context(),
         );
+    }
+
+    #[instrument(skip(self))]
+    fn handle_upload_complete(&mut self, key: &ChunkKey, message: Vec<ChunkMember>) {
+        let chunk_state = self.chunk_states.get_mut(key).unwrap();
+        chunk_state.members = message;
+        // TODO index
     }
 
     #[instrument(skip(self))]
@@ -622,7 +633,7 @@ impl State {
                         .ok()?;
                     Some(())
                 }
-                .in_current_span(),
+                .with_current_context(),
             );
         }
     }
@@ -645,7 +656,7 @@ impl State {
             async move {
                 let _ = result.send(Some(fragment.await));
             }
-            .in_current_span(),
+            .with_current_context(),
         );
     }
 
@@ -679,7 +690,7 @@ impl State {
                     .ok()?;
                 Some(())
             }
-            .in_current_span(),
+            .with_current_context(),
         );
     }
 
@@ -691,7 +702,7 @@ impl State {
         spawn(
             self.chunk_store
                 .put_fragment(key, chunk_state.local_index, fragment)
-                .in_current_span(),
+                .with_current_context(),
         );
     }
 }

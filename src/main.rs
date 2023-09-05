@@ -69,9 +69,9 @@ async fn main() {
             Shared {
                 fragment_size: 64,
                 inner_k: 2,
-                inner_n: 3,
+                inner_n: 2,
                 outer_k: 2,
-                outer_n: 3,
+                outer_n: 2,
                 chunk_root: "/local/cowsay/_entropy_chunk".into(),
             },
         );

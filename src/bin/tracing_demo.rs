@@ -4,22 +4,32 @@ use actix_web::web::{Bytes, Path};
 use actix_web::{get, post, App, HttpServer};
 use actix_web_opentelemetry::ClientExt;
 use opentelemetry::global;
+use opentelemetry::trace::FutureExt;
+use tokio::task::spawn_local;
 use tracing::instrument;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 #[post("/client-request/{path}")]
+#[instrument]
 async fn client_request(path: Path<String>) -> Bytes {
-    awc::Client::new()
-        .get(format!("http://127.0.0.1:8080/{path}"))
-        .trace_request()
-        .send()
-        .await
-        .unwrap()
-        .body()
-        .await
-        .unwrap()
+    spawn_local(
+        async move {
+            awc::Client::new()
+                .get(format!("http://127.0.0.1:8080/{path}"))
+                .trace_request()
+                .send()
+                .await
+                .unwrap()
+                .body()
+                .await
+                .unwrap()
+        }
+        .with_current_context(),
+    )
+    .await
+    .unwrap()
 }
 
 #[get("/{path}")]
