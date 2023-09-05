@@ -23,7 +23,9 @@ async def run_peers():
     tasks = []
     for index, host in enumerate(PEER_HOSTS):
         proc = await asyncio.create_subprocess_shell(
-            f"ssh {host} {WORK_DIR}/entropy {host} --plaza {PLAZA}"
+            f"ssh {host}"
+            " RUST_LOG=info RUST_BACKTRACE=1"
+            f" {WORK_DIR}/entropy {host} --plaza {PLAZA}"
             f" 1> {WORK_DIR}/entropy-{index:03}-output.txt"
             f" 2> {WORK_DIR}/entropy-{index:03}-errors.txt"
         )

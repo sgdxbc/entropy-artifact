@@ -35,7 +35,7 @@ $ curl -X POST http://<PEER_URI>/benchmark/put
 
 Poll benchmark status
 ```
-$ curl http://<PEER_URI>/benchmark/put
+$ curl http://<PEER_URI>/benchmark/put | jq
 ```
 
 Shutdown peers

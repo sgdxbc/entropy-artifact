@@ -64,7 +64,7 @@ async fn main() {
     if let Some(expect_number) = cli.plaza_service {
         common::setup_tracing("entropy.plaza");
 
-        let (state_handle, configure) = plaza::State::spawn::<Participant>(
+        let (run, configure) = plaza::State::spawn::<Participant>(
             expect_number,
             Shared {
                 fragment_size: 64,
@@ -75,6 +75,7 @@ async fn main() {
                 chunk_root: "/local/cowsay/_entropy_chunk".into(),
             },
         );
+        let state_handle = spawn(run);
         HttpServer::new(move || {
             App::new()
                 .wrap(actix_web_opentelemetry::RequestTracing::new())
@@ -133,7 +134,7 @@ async fn main() {
         run.shared.inner_k,
     );
 
-    let (app_handle, configuration) = app::State::spawn(
+    let (run_app, configuration) = app::State::spawn(
         peer,
         signing_key,
         run.shared.fragment_size,
@@ -144,6 +145,7 @@ async fn main() {
         peer_store,
         chunk_store,
     );
+    let app_handle = spawn_local(run_app);
 
     let server = HttpServer::new(move || {
         App::new()

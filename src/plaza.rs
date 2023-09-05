@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    future::Future,
     time::{Duration, SystemTime},
 };
 
@@ -11,11 +12,7 @@ use actix_web::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, to_value, Value};
-use tokio::{
-    spawn,
-    sync::{mpsc, oneshot},
-    task::JoinHandle,
-};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{info_span, Span};
 
 pub struct State<S> {
@@ -130,18 +127,21 @@ impl<S> State<S> {
     pub fn spawn<P>(
         expect_number: usize,
         shared: S,
-    ) -> (JoinHandle<Self>, impl FnOnce(&mut ServiceConfig) + Clone)
+    ) -> (
+        impl Future<Output = Self>,
+        impl FnOnce(&mut ServiceConfig) + Clone,
+    )
     where
         S: Send + Serialize + Clone + 'static,
         P: Serialize,
     {
         let mut state = Self::new(expect_number, shared);
         let messages = mpsc::unbounded_channel();
-        let handle = spawn(async move {
+        let run = async move {
             state.run::<P>(messages.1).await;
             state
-        });
-        (handle, |config| Self::config(config, messages.0))
+        };
+        (run, |config| Self::config(config, messages.0))
     }
 
     fn config(config: &mut ServiceConfig, app_data: AppState) {
