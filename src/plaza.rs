@@ -10,10 +10,10 @@ use actix_web::{
     HttpResponse,
 };
 
+use opentelemetry::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, to_value, Value};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{info_span, Span};
 
 pub struct State<S> {
     participants: HashMap<u32, Value>,
@@ -49,14 +49,14 @@ pub struct News {
 
 struct StateMessage {
     command: AppCommand,
-    span: Span,
+    context: Context,
 }
 
 impl From<AppCommand> for StateMessage {
     fn from(value: AppCommand) -> Self {
         Self {
             command: value,
-            span: Span::current(),
+            context: Context::current(),
         }
     }
 }
@@ -161,7 +161,7 @@ impl<S> State<S> {
     {
         while let Some(message) = messages.recv().await {
             // tokio::time::sleep(Duration::from_millis(100)).await;
-            let _entered = info_span!(parent: &message.span, "execute command").entered();
+            let _attach = message.context.attach();
             let closed = match message.command {
                 AppCommand::Join(participant, result) => {
                     self.participant_id += 1;

@@ -16,7 +16,7 @@ use actix_web::{
 use actix_web_opentelemetry::ClientExt;
 use awc::Client;
 use ed25519_dalek::SigningKey;
-use opentelemetry::trace::FutureExt;
+use opentelemetry::{trace::FutureExt, Context};
 use rand::{thread_rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -25,7 +25,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::spawn_local,
 };
-use tracing::{info, info_span, instrument, Instrument, Span};
+use tracing::{info, instrument};
 use wirehair::WirehairEncoder;
 
 use crate::{
@@ -73,14 +73,14 @@ enum AppCommand {
 
 struct StateMessage {
     command: AppCommand,
-    span: Span,
+    context: Context,
 }
 
 impl From<AppCommand> for StateMessage {
     fn from(value: AppCommand) -> Self {
         Self {
             command: value,
-            span: Span::current(),
+            context: Context::current(),
         }
     }
 }
@@ -302,7 +302,7 @@ impl State {
 
     async fn run(&mut self, mut messages: mpsc::UnboundedReceiver<StateMessage>) {
         while let Some(message) = messages.recv().await {
-            let _entered = info_span!(parent: &message.span, "execute command").entered();
+            let _attach = message.context.attach();
             match message.command {
                 AppCommand::Put => self.handle_put(),
                 AppCommand::PutStatus(result) => self.handle_put_state(result),
