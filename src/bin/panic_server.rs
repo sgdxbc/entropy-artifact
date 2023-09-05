@@ -21,11 +21,12 @@ async fn crash() -> HttpResponse {
 #[actix_web::main]
 async fn main() {
     set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
-    let tracer = opentelemetry_jaeger::new_agent_pipeline()
-        // .install_simple()?;
-        .with_service_name("panic_server")
+    let otlp_exporter = opentelemetry_otlp::new_exporter().tonic();
+    let tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(otlp_exporter)
         .install_batch(opentelemetry::runtime::Tokio)
-        .unwrap();
+        .expect("unable to install OTLP tracer");
 
     let hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {

@@ -67,11 +67,11 @@ async fn main() {
         let (run, configure) = plaza::State::spawn::<Participant>(
             expect_number,
             Shared {
-                fragment_size: 64,
-                inner_k: 2,
-                inner_n: 2,
-                outer_k: 2,
-                outer_n: 2,
+                fragment_size: 100,
+                inner_k: 4,
+                inner_n: 4,
+                outer_k: 10,
+                outer_n: 10,
                 chunk_root: "/local/cowsay/_entropy_chunk".into(),
             },
         );

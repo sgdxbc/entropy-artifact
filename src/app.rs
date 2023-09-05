@@ -56,7 +56,7 @@ enum AppCommand {
     Get,
     GetStatus(oneshot::Sender<()>),
 
-    UploadInvite(ChunkKey, u32, Peer),
+    UploadInvite(ChunkKey, u32, Peer, oneshot::Sender<bool>),
     UploadQueryFragment(ChunkKey, ChunkMember, oneshot::Sender<Option<Vec<u8>>>),
     UploadComplete(ChunkKey, Vec<ChunkMember>),
     DownloadQueryFragment(ChunkKey, Peer, oneshot::Sender<Option<Vec<u8>>>),
@@ -69,6 +69,7 @@ enum AppCommand {
     RecoverFinish(ChunkKey, Vec<u8>),
     UploadChunk(Vec<u8>),
     UploadFinish(ChunkKey),
+    UploadExtraInvite(ChunkKey),
 }
 
 struct StateMessage {
@@ -110,9 +111,14 @@ async fn upload_invite(
     path: Path<(String, u32)>,
     message: Json<Peer>,
 ) -> HttpResponse {
-    data.send(AppCommand::UploadInvite(parse_key(&path.0), path.1, message.0).into())
+    let result = oneshot::channel();
+    data.send(AppCommand::UploadInvite(parse_key(&path.0), path.1, message.0, result.0).into())
         .unwrap();
-    HttpResponse::Ok().finish()
+    if result.1.await.unwrap() {
+        HttpResponse::Ok().finish()
+    } else {
+        HttpResponse::new(StatusCode::IM_A_TEAPOT)
+    }
 }
 
 #[post("/upload/query-fragment/{key}")]
@@ -251,6 +257,7 @@ struct ChunkState {
 #[derive(Debug, Clone)]
 struct UploadChunkState {
     members: Vec<ChunkMember>,
+    next_invite: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -306,8 +313,8 @@ impl State {
             match message.command {
                 AppCommand::Put => self.handle_put(),
                 AppCommand::PutStatus(result) => self.handle_put_state(result),
-                AppCommand::UploadInvite(key, index, message) => {
-                    self.handle_upload_invite(&key, index, message)
+                AppCommand::UploadInvite(key, index, message, result) => {
+                    self.handle_upload_invite(&key, index, message, result)
                 }
                 AppCommand::UploadQueryFragment(key, message, result) => {
                     self.handle_upload_query_fragment(&key, message, result)
@@ -333,6 +340,7 @@ impl State {
                 }
                 AppCommand::UploadChunk(chunk) => self.handle_upload_chunk(chunk),
                 AppCommand::UploadFinish(key) => self.handle_upload_finish(&key),
+                AppCommand::UploadExtraInvite(key) => self.handle_upload_extra_invite(&key),
                 _ => todo!(),
             }
         }
@@ -398,30 +406,52 @@ impl State {
             key,
             UploadChunkState {
                 members: Default::default(),
+                next_invite: self.inner_n,
             },
         );
         for inner_index in 0..self.inner_n {
-            let peer = self
-                .peer_store
-                .closest_peers(&fragment_id(&key, inner_index), 1)[0];
-            let hex_key = hex_string(&key);
-            let peer_uri = peer.uri.clone();
-            let local_peer = self.local_peer.clone();
-            spawn_local(
-                async move {
-                    info!(peer_uri, "upload invite");
-                    let _ = Client::new()
-                        .post(format!(
-                            "{}/upload/invite/{hex_key}/{inner_index}",
-                            peer_uri
-                        ))
-                        .trace_request()
-                        .send_json(&local_peer)
-                        .await;
-                }
-                .with_current_context(),
-            );
+            self.upload_invite(&key, inner_index);
         }
+    }
+
+    fn upload_invite(&self, key: &ChunkKey, index: u32) {
+        let peer = self.peer_store.closest_peers(&fragment_id(key, index), 1)[0];
+        let hex_key = hex_string(key);
+        let peer_uri = peer.uri.clone();
+        let local_peer = self.local_peer.clone();
+        let task = async move {
+            let response = Client::new()
+                .post(format!("{}/upload/invite/{hex_key}/{index}", peer_uri))
+                .trace_request()
+                .send_json(&local_peer)
+                .await
+                .ok()?;
+            if response.status() == StatusCode::OK {
+                Some(())
+            } else {
+                None
+            }
+        };
+        let messages = self.messages.clone();
+        let key = *key;
+        spawn_local(
+            async move {
+                if task.with_current_context().await.is_none() {
+                    if let Some(messages) = messages.upgrade() {
+                        let _ = messages.send(AppCommand::UploadExtraInvite(key).into());
+                    }
+                }
+            }
+            .with_current_context(),
+        );
+    }
+
+    #[instrument(skip(self))]
+    fn handle_upload_extra_invite(&mut self, key: &ChunkKey) {
+        let put_upload = self.put_uploads.get_mut(key).unwrap();
+        let index = put_upload.next_invite;
+        put_upload.next_invite += 1;
+        self.upload_invite(key, index);
     }
 
     #[instrument(skip(self, result))]
@@ -430,9 +460,16 @@ impl State {
     }
 
     #[instrument(skip(self))]
-    fn handle_upload_invite(&mut self, key: &ChunkKey, index: u32, message: Peer) {
+    fn handle_upload_invite(
+        &mut self,
+        key: &ChunkKey,
+        index: u32,
+        message: Peer,
+        result: oneshot::Sender<bool>,
+    ) {
         let local_member = if let Some(chunk_state) = self.chunk_states.get(key) {
             if chunk_state.fragment_present {
+                let _ = result.send(true);
                 return;
             }
             chunk_state
@@ -464,6 +501,7 @@ impl State {
                 local_index = local_member.index,
                 index, "reject duplicated invite"
             );
+            let _ = result.send(false);
             return; //
         }
 
@@ -490,6 +528,7 @@ impl State {
             }
             .with_current_context(),
         );
+        let _ = result.send(true);
     }
 
     #[instrument(skip(self, result))]

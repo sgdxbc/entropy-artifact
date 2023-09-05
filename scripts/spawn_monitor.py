@@ -3,7 +3,7 @@ import sys
 
 ARGV = dict(enumerate(sys.argv))
 ARTIFACT = ARGV.get(1, "./target/artifact/simple-entropy")
-PEER_HOSTS = ["nsl-node1.d2"] * 10
+PEER_HOSTS = ["nsl-node1.d2"] * 40
 WORK_DIR = "/local/cowsay/artifacts"
 PLAZA = "http://nsl-node1.d2:8080"
 
@@ -59,7 +59,8 @@ async def main():
     print("upload artifact")
     await upload_artifact()
     print("run peers")
-    await run_peers()
+    if await run_peers():
+        exit(1)
 
 
 if __name__ == "__main__":

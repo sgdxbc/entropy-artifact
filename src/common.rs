@@ -1,13 +1,23 @@
+use opentelemetry::sdk::{trace, Resource};
+use opentelemetry::KeyValue;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
-pub fn setup_tracing(service_name: &str) {
+pub fn setup_tracing(service_name: &'static str) {
     opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
-    let tracer = opentelemetry_jaeger::new_agent_pipeline()
-        .with_service_name(service_name)
+    let otlp_exporter = opentelemetry_otlp::new_exporter().tonic();
+    let tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(otlp_exporter)
+        .with_trace_config(
+            trace::config().with_resource(Resource::new(vec![KeyValue::new(
+                "service.name",
+                service_name,
+            )])),
+        )
         .install_batch(opentelemetry::runtime::Tokio)
-        .expect("unable to install jaeger tracer");
+        .expect("unable to install OTLP tracer");
     tracing_subscriber::registry()
         // .with(tracing_subscriber::fmt::layer().json())
         .with(EnvFilter::from_default_env())

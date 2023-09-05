@@ -6,7 +6,12 @@ use actix_web::{
     App, HttpServer,
 };
 use actix_web_opentelemetry::ClientExt;
-use opentelemetry::{global, trace::FutureExt, Context};
+use opentelemetry::{
+    global,
+    sdk::{trace, Resource},
+    trace::FutureExt,
+    Context, KeyValue,
+};
 use tokio::{sync::mpsc, task::spawn_local};
 use tracing::instrument;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -56,9 +61,18 @@ async fn echo(path: Path<String>) -> String {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
-    let tracer = opentelemetry_jaeger::new_agent_pipeline()
-        .with_service_name("tracing_demo")
-        .install_batch(opentelemetry::runtime::Tokio)?;
+    let otlp_exporter = opentelemetry_otlp::new_exporter().tonic();
+    let tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(otlp_exporter)
+        .with_trace_config(
+            trace::config().with_resource(Resource::new(vec![KeyValue::new(
+                "service.name",
+                "tracing_demo",
+            )])),
+        )
+        .install_batch(opentelemetry::runtime::Tokio)
+        .expect("unable to install OTLP tracer");
 
     tracing_subscriber::registry()
         .with(EnvFilter::from_default_env())
