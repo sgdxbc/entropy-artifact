@@ -94,15 +94,11 @@ async fn main() {
 
     common::setup_tracing("entropy.peer");
 
-    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let listener = TcpListener::bind((&*cli.host, 0)).await.unwrap();
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
     let peer = Peer {
-        uri: format!(
-            "http://{}:{}",
-            cli.host,
-            listener.local_addr().unwrap().port()
-        ),
+        uri: format!("http://{}", listener.local_addr().unwrap()),
         id: Sha256::digest(verifying_key).into(),
         key: verifying_key,
     };
