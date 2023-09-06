@@ -43,6 +43,7 @@ enum AppCommand {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct News {
+    pub wait: Duration,
     pub shutdown: bool,
     // TODO activities
 }
@@ -88,6 +89,7 @@ async fn shutdown(data: Data<AppState>) -> HttpResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Run<P, S> {
     Retry(Duration),
+    Shutdown,
     Ready {
         participants: Vec<P>,
         assemble_time: SystemTime,
@@ -127,6 +129,7 @@ impl<S> State<S> {
     pub fn spawn<P>(
         expect_number: usize,
         shared: S,
+        stop: mpsc::UnboundedSender<()>,
     ) -> (
         impl Future<Output = Self>,
         impl FnOnce(&mut ServiceConfig) + Clone,
@@ -138,7 +141,7 @@ impl<S> State<S> {
         let mut state = Self::new(expect_number, shared);
         let messages = mpsc::unbounded_channel();
         let run = async move {
-            state.run::<P>(messages.1).await;
+            state.run::<P>(messages.1, stop).await;
             state
         };
         (run, |config| Self::config(config, messages.0))
@@ -154,8 +157,11 @@ impl<S> State<S> {
             .service(interval_news);
     }
 
-    async fn run<P>(&mut self, mut messages: mpsc::UnboundedReceiver<StateMessage>)
-    where
+    async fn run<P>(
+        &mut self,
+        mut messages: mpsc::UnboundedReceiver<StateMessage>,
+        stop: mpsc::UnboundedSender<()>,
+    ) where
         S: Serialize + Clone,
         P: Serialize,
     {
@@ -176,21 +182,25 @@ impl<S> State<S> {
                     let participant = self.participants.remove(&participant_id).unwrap();
                     self.activities
                         .insert(SystemTime::now(), Activity::Leave(participant));
-                    false
+                    if self.shutdown && self.participants.is_empty() {
+                        stop.send(()).is_err()
+                    } else {
+                        false
+                    }
                 }
                 AppCommand::Shutdown => {
                     self.shutdown = true;
                     false
                 }
                 AppCommand::RunStatus(result) => {
-                    let response = if self.participants.len() < self.ready_number {
-                        to_value(Run::<P, S>::Retry(
-                            Duration::from_millis(self.ready_number as u64 / 100 / 1000)
-                                .max(Duration::from_secs(1)),
-                        ))
-                        .unwrap()
+                    let response = if self.shutdown {
+                        to_value(Run::<P, S>::Shutdown).unwrap()
+                    } else if self.participants.len() < self.ready_number {
+                        to_value(Run::<P, S>::Retry(self.wait_duration())).unwrap()
                     } else {
-                        let assemble_time = *self.assemble_time.get_or_insert_with(SystemTime::now);
+                        let assemble_time = *self
+                            .assemble_time
+                            .get_or_insert(SystemTime::now() + self.wait_duration());
                         to_value(Run::Ready {
                             participants: Vec::from_iter(self.participants.values()),
                             assemble_time,
@@ -202,6 +212,7 @@ impl<S> State<S> {
                 }
                 AppCommand::News(result) => {
                     let news = News {
+                        wait: self.wait_duration(),
                         shutdown: self.shutdown,
                     };
                     result.send(news).is_err()
@@ -211,5 +222,12 @@ impl<S> State<S> {
                 break;
             }
         }
+    }
+
+    fn wait_duration(&self) -> Duration {
+        // throttle to 100 retry per second
+        Duration::from_millis(self.ready_number as u64 * 10)
+            // or 1 retry per second per peer if slower
+            .max(Duration::from_secs(1))
     }
 }

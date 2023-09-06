@@ -87,7 +87,6 @@ impl From<AppCommand> for StateMessage {
 }
 
 type AppState = mpsc::UnboundedSender<StateMessage>;
-pub type ShutdownServer = mpsc::UnboundedSender<()>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChunkMember {

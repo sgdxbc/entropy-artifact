@@ -4,18 +4,24 @@ use actix_web::{http::StatusCode, App, HttpServer};
 use actix_web_opentelemetry::ClientExt;
 use awc::Client;
 use clap::Parser;
+use common::hex_string;
 use ed25519_dalek::SigningKey;
 use opentelemetry::{
     trace::{FutureExt, TraceContextExt, Tracer},
-    Context,
+    Context, KeyValue,
 };
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{net::TcpListener, spawn, sync::mpsc, task::spawn_local, time::sleep};
+use tokio::{
+    net::TcpListener,
+    spawn,
+    sync::mpsc,
+    task::spawn_local,
+    time::{sleep, timeout},
+};
 
 use crate::{
-    app::ShutdownServer,
     peer::Peer,
     plaza::{News, Run},
 };
@@ -62,8 +68,9 @@ async fn main() {
     let cli = Cli::parse();
 
     if let Some(expect_number) = cli.plaza_service {
-        common::setup_tracing("entropy.plaza");
+        common::setup_tracing([KeyValue::new("service.name", "entropy.plaza")]);
 
+        let mut shutdown = mpsc::unbounded_channel();
         let (run, configure) = plaza::State::spawn::<Participant>(
             expect_number,
             Shared {
@@ -72,44 +79,61 @@ async fn main() {
                 inner_n: 4,
                 outer_k: 10,
                 outer_n: 10,
-                chunk_root: "/local/cowsay/_entropy_chunk".into(),
+                chunk_root: "/local/cowsay/artifacts/entropy_chunk".into(),
             },
+            shutdown.0,
         );
         let state_handle = spawn(run);
-        HttpServer::new(move || {
+        let server = HttpServer::new(move || {
             App::new()
                 .wrap(actix_web_opentelemetry::RequestTracing::new())
                 .configure(configure.clone())
         })
         .bind((cli.host, 8080))
         .unwrap()
-        .run()
-        .await
-        .unwrap();
+        .run();
+        let server_handle = server.handle();
+        spawn(async move {
+            let _ = shutdown.1.recv().await;
+            server_handle.stop(true).await;
+        });
 
+        server.await.unwrap();
         state_handle.await.unwrap(); // inspect returned state if necessary
         common::shutdown_tracing().await;
         return;
     }
 
-    common::setup_tracing("entropy.peer");
-
-    let listener = TcpListener::bind((&*cli.host, 0)).await.unwrap();
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
+    let peer_id = Sha256::digest(verifying_key);
+    println!("{}", hex_string(&peer_id));
+    common::setup_tracing([
+        KeyValue::new("service.name", "entropy.peer"),
+        KeyValue::new("service.instance.id", hex_string(&peer_id)),
+    ]);
+
+    let listener = TcpListener::bind((&*cli.host, 0)).await.unwrap();
     let peer = Peer {
         uri: format!("http://{}", listener.local_addr().unwrap()),
-        id: Sha256::digest(verifying_key).into(),
+        id: peer_id.into(),
         key: verifying_key,
     };
+    println!("{}", peer.uri);
 
-    let span = opentelemetry::global::tracer("").start("join network");
     let run = join_network(&peer, &cli)
-        .with_context(Context::current_with_span(span))
+        .with_context(Context::current_with_span(
+            opentelemetry::global::tracer("").start("join network"),
+        ))
         .await;
+    let Some(run) = run else {
+        common::shutdown_tracing().await;
+        return;
+    };
 
-    let mut shutdown = mpsc::unbounded_channel();
-    spawn_local(poll_network(&cli, shutdown.0));
+    let poll_handle = spawn_local(poll_network(&cli).with_context(Context::current_with_span(
+        opentelemetry::global::tracer("").start("poll network"),
+    )));
 
     let peer_store = peer::Store::new(Vec::from_iter(run.participants.into_iter().filter_map(
         |participant| {
@@ -153,8 +177,9 @@ async fn main() {
     .run();
     let server_handle = server.handle();
     spawn(async move {
-        shutdown.1.recv().await;
-        server_handle.stop(true).await;
+        poll_handle.await.unwrap();
+        // this rarely stucks, not sure why
+        let _ = timeout(Duration::from_secs(1), server_handle.stop(false)).await;
     });
 
     println!("READY");
@@ -167,7 +192,7 @@ async fn main() {
 }
 
 // #[instrument(skip_all, fields(peer = common::hex_string(&peer.id)))]
-async fn join_network(peer: &Peer, cli: &Cli) -> ReadyRun {
+async fn join_network(peer: &Peer, cli: &Cli) -> Option<ReadyRun> {
     let client = Client::new();
     let mut response = client
         .post(format!("{}/join", cli.plaza.as_ref().unwrap()))
@@ -197,16 +222,17 @@ async fn join_network(peer: &Peer, cli: &Cli) -> ReadyRun {
             .unwrap()
         {
             Run::Retry(interval) => retry_interval = interval,
+            Run::Shutdown => break None,
             Run::Ready {
                 participants,
                 assemble_time: _,
                 shared,
             } => {
-                break ReadyRun {
+                break Some(ReadyRun {
                     participants,
                     shared,
                     join_id,
-                }
+                })
             }
         }
     }
@@ -225,12 +251,13 @@ async fn leave_network(cli: &Cli, join_id: u32) {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-fn poll_network(cli: &Cli, shutdown: ShutdownServer) -> impl Future<Output = ()> {
+fn poll_network(cli: &Cli) -> impl Future<Output = ()> {
     let endpoint = format!("{}/news", cli.plaza.as_ref().unwrap());
     async move {
         let client = Client::new();
+        let mut wait = Duration::from_secs(1);
         loop {
-            sleep(Duration::from_secs(1)).await; //
+            sleep(wait).await; //
             let news = client
                 .get(&endpoint)
                 .trace_request()
@@ -240,10 +267,11 @@ fn poll_network(cli: &Cli, shutdown: ShutdownServer) -> impl Future<Output = ()>
                 .json::<News>()
                 .await
                 .unwrap();
+            tracing::info!(shutdown = news.shutdown, "news");
             if news.shutdown {
-                shutdown.send(()).unwrap();
                 break;
             }
+            wait = news.wait;
         }
     }
 }

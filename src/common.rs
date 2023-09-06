@@ -4,18 +4,12 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
-pub fn setup_tracing(service_name: &'static str) {
+pub fn setup_tracing(pairs: impl IntoIterator<Item = KeyValue>) {
     opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
-    let otlp_exporter = opentelemetry_otlp::new_exporter().tonic();
     let tracer = opentelemetry_otlp::new_pipeline()
         .tracing()
-        .with_exporter(otlp_exporter)
-        .with_trace_config(
-            trace::config().with_resource(Resource::new(vec![KeyValue::new(
-                "service.name",
-                service_name,
-            )])),
-        )
+        .with_exporter(opentelemetry_otlp::new_exporter().tonic())
+        .with_trace_config(trace::config().with_resource(Resource::new(pairs)))
         .install_batch(opentelemetry::runtime::Tokio)
         .expect("unable to install OTLP tracer");
     tracing_subscriber::registry()

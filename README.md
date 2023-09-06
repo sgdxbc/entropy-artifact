@@ -6,7 +6,12 @@ Prepare third-party dependencies.
 $ git clone https://github.com/catid/wirehair wirehair/wirehair
 ```
 
-Run the plaza service
+Build artifact
+```
+$ cargo build --profile artifact --bin simple-entropy
+```
+
+Run the plaza service (to be updated)
 ```
 $ RUST_LOG=info \
     cargo run --release -- <HOST_NAME> --plaza-service <N>
@@ -15,13 +20,16 @@ $ RUST_LOG=info \
 Replace `<HOST_NAME>` with server's publicly-known host name, e.g. `localhost`.
 Replace `<N>` with the number of peers to join the network.
 
-Then run each peer in a dedicated shell
-```
-$ RUST_LOG=info \
-    cargo run --release -- <HOST_NAME> --plaza <PLAZA_HOST_NAME>
-```
+Modify `scripts/spawn_monitor.py` with expected `WORK_DIR`, `NUM_PEER` for 
+number of peers on each host, and `PLAZA` for plaza service endpoint, which
+should be `http://<PLAZA_HOST_NAME>:8080`.
+Modify `scripts/spawn_monitor_remote.py` with expected `WORK_DIR` and `HOSTS`/
+`SSH_HOSTS` for hosts.
 
-Peer prints `READY` after joining the network and finishing initialization.
+Then spawn and monitor peers on hosts
+```
+$ python3 scripts/spawn_monitor/remote.py
+```
 
 Get a list of all peer URI's
 ```
@@ -38,12 +46,7 @@ Poll benchmark status
 $ curl http://<PEER_URI>/benchmark/put | jq
 ```
 
-Shutdown peers
+Shutdown peers and plaza service
 ```
 $ curl -X POST http://<PLAZE_HOST_NAME>:8080/shutdown
-```
-
-Shutdown plaza service by sending a `SIGTERM`
-```
-$ pkill -TERM entropy
 ```
