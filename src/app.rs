@@ -58,17 +58,19 @@ enum AppCommand {
     UploadInvite(ChunkKey, u32, Peer, oneshot::Sender<bool>),
     UploadQueryFragment(ChunkKey, ChunkMember, oneshot::Sender<Option<Vec<u8>>>),
     UploadComplete(ChunkKey, Vec<ChunkMember>),
-    DownloadQueryFragment(ChunkKey, Peer, oneshot::Sender<Option<Vec<u8>>>),
+    DownloadQueryFragment(ChunkKey, oneshot::Sender<Option<Vec<u8>>>),
     RepairInvite(ChunkKey, u32, Vec<ChunkMember>),
     RepairQueryFragment(ChunkKey, ChunkMember, oneshot::Sender<Option<Vec<u8>>>),
     Ping(ChunkKey, PingMessage),
 
     AcceptUploadFragment(ChunkKey, Bytes),
-    AcceptFragment(ChunkKey, u32, Bytes),
-    RecoverFinish(ChunkKey, Vec<u8>),
-    UploadChunk(usize, Vec<u8>),
+    UploadChunk(usize, u32, Vec<u8>),
     UploadFinish(ChunkKey),
     UploadExtraInvite(ChunkKey),
+    AcceptRepairFragment(ChunkKey, u32, Bytes),
+    RepairRecoverFinish(ChunkKey, Vec<u8>),
+    AcceptDownloadFragment(ChunkKey, u32, Bytes),
+    DownloadFinish(ChunkKey, Vec<u8>),
 }
 
 struct StateMessage {
@@ -150,13 +152,9 @@ async fn upload_complete(
 
 #[get("/download/query-fragment/{key}")]
 #[instrument(skip(data))]
-async fn download_query_fragment(
-    data: Data<AppState>,
-    path: Path<String>,
-    message: Json<Peer>,
-) -> HttpResponse {
+async fn download_query_fragment(data: Data<AppState>, path: Path<String>) -> HttpResponse {
     let result = oneshot::channel();
-    data.send(AppCommand::DownloadQueryFragment(parse_key(&path), message.0, result.0).into())
+    data.send(AppCommand::DownloadQueryFragment(parse_key(&path), result.0).into())
         .unwrap();
     if let Some(fragment) = result.1.await.unwrap() {
         HttpResponse::Ok().body(fragment)
@@ -265,8 +263,10 @@ struct ChunkState {
 #[derive(Debug, Clone)]
 struct UploadChunkState {
     id: usize,
+    index: u32,
     members: Vec<ChunkMember>,
     next_invite: u32,
+    recovered: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -324,6 +324,7 @@ impl State {
             match message.command {
                 AppCommand::Put(result) => self.handle_put(result),
                 AppCommand::PutStatus(id, result) => self.handle_put_state(id, result),
+                AppCommand::Get(id) => self.handle_get(id),
                 AppCommand::UploadInvite(key, index, message, result) => {
                     self.handle_upload_invite(&key, index, message, result)
                 }
@@ -339,20 +340,28 @@ impl State {
                 AppCommand::RepairQueryFragment(key, message, result) => {
                     self.handle_repair_query_fragment(&key, message, result)
                 }
+                AppCommand::DownloadQueryFragment(key, result) => {
+                    self.handle_download_query_fragment(&key, result)
+                }
                 AppCommand::Ping(key, message) => self.handle_ping(&key, message),
                 AppCommand::AcceptUploadFragment(key, fragment) => {
                     self.handle_accept_upload_fragment(&key, fragment)
                 }
-                AppCommand::AcceptFragment(key, index, fragment) => {
+                AppCommand::AcceptRepairFragment(key, index, fragment) => {
                     self.handle_accept_fragment(&key, index, fragment)
                 }
-                AppCommand::RecoverFinish(key, fragment) => {
+                AppCommand::AcceptDownloadFragment(key, index, fragment) => {
+                    self.handle_accept_download_fragment(&key, index, fragment)
+                }
+                AppCommand::RepairRecoverFinish(key, fragment) => {
                     self.handle_recover_finish(&key, fragment)
                 }
-                AppCommand::UploadChunk(id, chunk) => self.handle_upload_chunk(id, chunk),
+                AppCommand::UploadChunk(id, index, chunk) => {
+                    self.handle_upload_chunk(id, index, chunk)
+                }
                 AppCommand::UploadFinish(key) => self.handle_upload_finish(&key),
                 AppCommand::UploadExtraInvite(key) => self.handle_upload_extra_invite(&key),
-                _ => todo!(),
+                AppCommand::DownloadFinish(key, chunk) => self.handle_download_finish(&key, chunk),
             }
         }
     }
@@ -368,7 +377,8 @@ impl State {
             .service(repair_query_fragment)
             .service(ping)
             .service(benchmark_put)
-            .service(benchmark_put_status);
+            .service(benchmark_put_status)
+            .service(benchmark_get);
     }
 
     #[instrument(skip(self))]
@@ -404,7 +414,8 @@ impl State {
                     let mut chunk = vec![0; (fragment_size * inner_k) as _];
                     encoder.encode(outer_index, &mut chunk).unwrap();
                     if let Some(messages) = messages.upgrade() {
-                        let _ = messages.send(AppCommand::UploadChunk(id, chunk).into());
+                        let _ =
+                            messages.send(AppCommand::UploadChunk(id, outer_index, chunk).into());
                     }
                 }
                 .with_current_context(),
@@ -414,14 +425,16 @@ impl State {
     }
 
     #[instrument(skip(self))]
-    fn handle_upload_chunk(&mut self, id: usize, chunk: Vec<u8>) {
+    fn handle_upload_chunk(&mut self, id: usize, index: u32, chunk: Vec<u8>) {
         let key = self.chunk_store.upload_chunk(chunk);
         self.put_uploads.insert(
             key,
             UploadChunkState {
                 id,
+                index,
                 members: Default::default(),
                 next_invite: self.inner_n,
+                recovered: false,
             },
         );
         for inner_index in 0..self.inner_n {
@@ -635,7 +648,97 @@ impl State {
                 self.fragment_size * self.inner_k,
             ),
         );
-        //
+        for key in &put_state.uploads {
+            self.chunk_store.recover_chunk(key);
+            for member in &self.put_uploads[key].members {
+                let peer_uri = member.peer.uri.clone();
+                let hex_key = hex_string(key);
+                let key = *key;
+                let index = member.index;
+                let messages = self.messages.clone();
+                spawn_local(async move {
+                    let fragment = Client::new()
+                        .post(format!("{}/download/query-fragment/{hex_key}", peer_uri))
+                        .trace_request()
+                        .send()
+                        .await
+                        .ok()?
+                        .body()
+                        .await
+                        .ok()?;
+                    messages
+                        .upgrade()?
+                        .send(AppCommand::AcceptDownloadFragment(key, index, fragment).into())
+                        .ok()?;
+                    Some(())
+                });
+            }
+        }
+    }
+
+    #[instrument(skip(self))]
+    fn handle_download_query_fragment(
+        &mut self,
+        key: &ChunkKey,
+        result: oneshot::Sender<Option<Vec<u8>>>,
+    ) {
+        let Some(chunk_state) = self.chunk_states.get(key) else {
+            let _ = result.send(None);
+            return;
+        };
+        assert!(chunk_state.fragment_present);
+        let fragment = self.chunk_store.get_fragment(key, chunk_state.local_index);
+        spawn(
+            async move {
+                let _ = result.send(Some(fragment.await));
+            }
+            .with_current_context(),
+        );
+    }
+
+    #[instrument(skip(self, fragment))]
+    fn handle_accept_download_fragment(&mut self, key: &ChunkKey, index: u32, fragment: Bytes) {
+        if self.put_uploads[key].recovered
+            || !self.get_recovers.contains_key(&self.put_uploads[key].id)
+        {
+            return;
+        }
+        let task = self
+            .chunk_store
+            .recover_with_fragment(key, index, fragment.to_vec());
+        let messages = self.messages.clone();
+        let key = *key;
+        spawn(async move {
+            let chunk = task.await?;
+            messages
+                .upgrade()?
+                .send(AppCommand::DownloadFinish(key, chunk).into())
+                .ok()?;
+            Some(())
+        });
+    }
+
+    #[instrument(skip(self, chunk))]
+    fn handle_download_finish(&mut self, key: &ChunkKey, chunk: Vec<u8>) {
+        let upload = self.put_uploads.get_mut(key).unwrap();
+        assert!(!upload.recovered);
+        upload.recovered = true;
+        self.chunk_store.finish_recover(key);
+        let decoder = self.get_recovers.get_mut(&upload.id).unwrap();
+        if decoder.decode(upload.index, &chunk).unwrap() {
+            let decoder = self.get_recovers.remove(&upload.id).unwrap();
+            let mut object =
+                vec![
+                    0;
+                    self.fragment_size as usize * self.inner_k as usize * self.outer_k as usize
+                ];
+            decoder.recover(&mut object).unwrap();
+            self.put_states[upload.id].get_end = Some(SystemTime::now());
+            assert_eq!(
+                Sha256::digest(object),
+                self.put_states[upload.id].key.into()
+            );
+        }
     }
 
     #[instrument(skip(self, result))]
@@ -698,7 +801,7 @@ impl State {
                         .ok()?;
                     messages
                         .upgrade()?
-                        .send(AppCommand::AcceptFragment(key, member.index, fragment).into())
+                        .send(AppCommand::AcceptRepairFragment(key, member.index, fragment).into())
                         .ok()?;
                     Some(())
                 }
@@ -755,7 +858,7 @@ impl State {
                 let fragment = task.await?;
                 messages
                     .upgrade()?
-                    .send(AppCommand::RecoverFinish(key, fragment).into())
+                    .send(AppCommand::RepairRecoverFinish(key, fragment).into())
                     .ok()?;
                 Some(())
             }
