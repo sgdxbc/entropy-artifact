@@ -97,16 +97,14 @@ impl Store {
             .insert(*key, Arc::new(Mutex::new(Some(decoder))));
     }
 
-    pub fn accept_fragment(
+    fn with_fragment(
         &self,
         key: &ChunkKey,
         remote_index: u32,
         remote_fragment: Vec<u8>,
-        index: u32,
-    ) -> impl Future<Output = Option<Vec<u8>>> {
+    ) -> impl Future<Output = Option<WirehairDecoder>> {
         assert_eq!(remote_fragment.len(), self.fragment_size as usize);
         let decoder_cell = self.recovers[key].clone();
-        let fragment_size = self.fragment_size;
         async move {
             let mut decoder_cell = decoder_cell.lock().unwrap();
             let Some(decoder) = &mut *decoder_cell else {
@@ -115,14 +113,47 @@ impl Store {
             if !decoder.decode(remote_index, &remote_fragment).unwrap() {
                 return None;
             }
-            let decoder = decoder_cell.take().unwrap();
-            let mut fragment = vec![0; fragment_size as usize];
-            decoder
-                .into_encoder()
-                .unwrap()
-                .encode(index, &mut fragment)
-                .unwrap();
-            Some(fragment)
+            Some(decoder_cell.take().unwrap())
+        }
+    }
+
+    pub fn recover_with_fragment(
+        &self,
+        key: &ChunkKey,
+        remote_index: u32,
+        remote_fragment: Vec<u8>,
+    ) -> impl Future<Output = Option<Vec<u8>>> {
+        let decoder = self.with_fragment(key, remote_index, remote_fragment);
+        let fragment_size = self.fragment_size;
+        let inner_k = self.inner_k;
+        async move {
+            decoder.await.map(|decoder| {
+                let mut chunk = vec![0; (fragment_size * inner_k) as usize];
+                decoder.recover(&mut chunk).unwrap();
+                chunk
+            })
+        }
+    }
+
+    pub fn encode_with_fragment(
+        &self,
+        key: &ChunkKey,
+        remote_index: u32,
+        remote_fragment: Vec<u8>,
+        index: u32,
+    ) -> impl Future<Output = Option<Vec<u8>>> {
+        let decoder = self.with_fragment(key, remote_index, remote_fragment);
+        let fragment_size = self.fragment_size;
+        async move {
+            decoder.await.map(|decoder| {
+                let mut fragment = vec![0; fragment_size as usize];
+                decoder
+                    .into_encoder()
+                    .unwrap()
+                    .encode(index, &mut fragment)
+                    .unwrap();
+                fragment
+            })
         }
     }
 

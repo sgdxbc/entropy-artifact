@@ -26,7 +26,7 @@ use tokio::{
     task::spawn_local,
 };
 use tracing::{info, instrument};
-use wirehair::WirehairEncoder;
+use wirehair::{WirehairDecoder, WirehairEncoder};
 
 use crate::{
     chunk::{self, ChunkKey},
@@ -51,10 +51,9 @@ fn parse_key(s: &str) -> ChunkKey {
 }
 
 enum AppCommand {
-    Put,
-    PutStatus(oneshot::Sender<PutState>),
-    Get,
-    GetStatus(oneshot::Sender<()>),
+    Put(oneshot::Sender<usize>),
+    PutStatus(usize, oneshot::Sender<PutState>),
+    Get(usize),
 
     UploadInvite(ChunkKey, u32, Peer, oneshot::Sender<bool>),
     UploadQueryFragment(ChunkKey, ChunkMember, oneshot::Sender<Option<Vec<u8>>>),
@@ -67,7 +66,7 @@ enum AppCommand {
     AcceptUploadFragment(ChunkKey, Bytes),
     AcceptFragment(ChunkKey, u32, Bytes),
     RecoverFinish(ChunkKey, Vec<u8>),
-    UploadChunk(Vec<u8>),
+    UploadChunk(usize, Vec<u8>),
     UploadFinish(ChunkKey),
     UploadExtraInvite(ChunkKey),
 }
@@ -210,15 +209,25 @@ async fn repair_query_fragment(
 #[post("/benchmark/put")]
 #[instrument(skip(data))]
 async fn benchmark_put(data: Data<AppState>) -> HttpResponse {
-    data.send(AppCommand::Put.into()).unwrap();
+    let result = oneshot::channel();
+    data.send(AppCommand::Put(result.0).into()).unwrap();
+    HttpResponse::Ok().json(result.1.await.unwrap())
+}
+
+#[post("/benchmark/get/{id}")]
+#[instrument(skip(data))]
+async fn benchmark_get(data: Data<AppState>, path: Path<usize>) -> HttpResponse {
+    data.send(AppCommand::Get(path.into_inner()).into())
+        .unwrap();
     HttpResponse::Ok().finish()
 }
 
-#[get("/benchmark/put")]
+#[get("/benchmark/put/{id}")]
 #[instrument(skip(data))]
-async fn benchmark_put_status(data: Data<AppState>) -> HttpResponse {
+async fn benchmark_put_status(data: Data<AppState>, path: Path<usize>) -> HttpResponse {
     let result = oneshot::channel();
-    data.send(AppCommand::PutStatus(result.0).into()).unwrap();
+    data.send(AppCommand::PutStatus(path.into_inner(), result.0).into())
+        .unwrap();
     HttpResponse::Ok().json(result.1.await.unwrap())
 }
 
@@ -237,9 +246,9 @@ pub struct State {
     chunk_store: chunk::Store,
 
     chunk_states: HashMap<ChunkKey, ChunkState>,
-    put_state: Option<PutState>,
+    put_states: Vec<PutState>,
     put_uploads: HashMap<ChunkKey, UploadChunkState>,
-    get_downloads: HashMap<ChunkKey, UploadChunkState>,
+    get_recovers: HashMap<usize, WirehairDecoder>,
 
     messages: mpsc::WeakUnboundedSender<StateMessage>,
 }
@@ -255,6 +264,7 @@ struct ChunkState {
 
 #[derive(Debug, Clone)]
 struct UploadChunkState {
+    id: usize,
     members: Vec<ChunkMember>,
     next_invite: u32,
 }
@@ -262,9 +272,11 @@ struct UploadChunkState {
 #[derive(Debug, Clone, Serialize)]
 struct PutState {
     key: [u8; 32],
-    start: SystemTime,
-    end: Option<SystemTime>,
-    num_upload: usize,
+    uploads: HashSet<ChunkKey>,
+    put_start: SystemTime,
+    put_end: Option<SystemTime>,
+    get_start: Option<SystemTime>,
+    get_end: Option<SystemTime>,
 }
 
 impl State {
@@ -294,9 +306,9 @@ impl State {
             peer_store,
             chunk_store,
             chunk_states: Default::default(),
-            put_state: None,
+            put_states: Default::default(),
             put_uploads: Default::default(),
-            get_downloads: Default::default(),
+            get_recovers: Default::default(),
             messages: messages.0.downgrade(),
         };
         let run_state = async move {
@@ -310,8 +322,8 @@ impl State {
         while let Some(message) = messages.recv().await {
             let _attach = message.context.attach();
             match message.command {
-                AppCommand::Put => self.handle_put(),
-                AppCommand::PutStatus(result) => self.handle_put_state(result),
+                AppCommand::Put(result) => self.handle_put(result),
+                AppCommand::PutStatus(id, result) => self.handle_put_state(id, result),
                 AppCommand::UploadInvite(key, index, message, result) => {
                     self.handle_upload_invite(&key, index, message, result)
                 }
@@ -337,7 +349,7 @@ impl State {
                 AppCommand::RecoverFinish(key, fragment) => {
                     self.handle_recover_finish(&key, fragment)
                 }
-                AppCommand::UploadChunk(chunk) => self.handle_upload_chunk(chunk),
+                AppCommand::UploadChunk(id, chunk) => self.handle_upload_chunk(id, chunk),
                 AppCommand::UploadFinish(key) => self.handle_upload_finish(&key),
                 AppCommand::UploadExtraInvite(key) => self.handle_upload_extra_invite(&key),
                 _ => todo!(),
@@ -360,22 +372,24 @@ impl State {
     }
 
     #[instrument(skip(self))]
-    fn handle_put(&mut self) {
-        if let Some(put_state) = &self.put_state {
-            if put_state.end.is_none() {
+    fn handle_put(&mut self, result: oneshot::Sender<usize>) {
+        if let Some(put_state) = self.put_states.last() {
+            if put_state.put_end.is_none() {
                 tracing::warn!("previous PUT operation not end");
             }
         }
 
+        let id = self.put_states.len();
         let mut object = vec![0; (self.fragment_size * self.inner_k * self.outer_k) as _];
         thread_rng().fill_bytes(&mut object);
-        self.put_state = Some(PutState {
+        self.put_states.push(PutState {
             key: Sha256::digest(&object).into(),
-            start: SystemTime::now(),
-            end: None,
-            num_upload: 0,
+            uploads: Default::default(),
+            put_start: SystemTime::now(),
+            put_end: None,
+            get_start: None,
+            get_end: None,
         });
-        self.put_uploads.clear();
         let encoder = Arc::new(WirehairEncoder::new(
             object,
             self.fragment_size * self.inner_k,
@@ -390,20 +404,22 @@ impl State {
                     let mut chunk = vec![0; (fragment_size * inner_k) as _];
                     encoder.encode(outer_index, &mut chunk).unwrap();
                     if let Some(messages) = messages.upgrade() {
-                        let _ = messages.send(AppCommand::UploadChunk(chunk).into());
+                        let _ = messages.send(AppCommand::UploadChunk(id, chunk).into());
                     }
                 }
                 .with_current_context(),
             );
         }
+        let _ = result.send(id);
     }
 
     #[instrument(skip(self))]
-    fn handle_upload_chunk(&mut self, chunk: Vec<u8>) {
+    fn handle_upload_chunk(&mut self, id: usize, chunk: Vec<u8>) {
         let key = self.chunk_store.upload_chunk(chunk);
         self.put_uploads.insert(
             key,
             UploadChunkState {
+                id,
                 members: Default::default(),
                 next_invite: self.inner_n,
             },
@@ -451,11 +467,6 @@ impl State {
         let index = put_upload.next_invite;
         put_upload.next_invite += 1;
         self.upload_invite(key, index);
-    }
-
-    #[instrument(skip(self, result))]
-    fn handle_put_state(&mut self, result: oneshot::Sender<PutState>) {
-        let _ = result.send(self.put_state.clone().unwrap());
     }
 
     #[instrument(skip(self))]
@@ -549,8 +560,7 @@ impl State {
         });
         upload.members.push(message);
         if upload.members.len() == self.inner_n as usize {
-            let upload = self.put_uploads.remove(key).unwrap();
-            self.get_downloads.insert(*key, upload.clone());
+            let upload = self.put_uploads.get(key).unwrap();
             let mut tasks = Vec::new();
             let hex_key = hex_string(key);
             for member in upload.members.clone() {
@@ -603,13 +613,34 @@ impl State {
 
     #[instrument(skip(self))]
     fn handle_upload_finish(&mut self, key: &ChunkKey) {
-        let put_state = self.put_state.as_mut().unwrap();
-        assert!(self.get_downloads.contains_key(key));
+        let put_state = &mut self.put_states[self.put_uploads[key].id];
         self.chunk_store.finish_upload(key);
-        put_state.num_upload += 1;
-        if put_state.num_upload == self.outer_n as usize {
-            put_state.end = Some(SystemTime::now());
+        assert!(put_state.put_end.is_none());
+        put_state.uploads.insert(*key);
+        if put_state.uploads.len() == self.outer_n as usize {
+            put_state.put_end = Some(SystemTime::now());
         }
+    }
+
+    #[instrument(skip(self))]
+    fn handle_get(&mut self, id: usize) {
+        let put_state = &mut self.put_states[id];
+        assert!(put_state.put_end.is_some());
+        assert!(put_state.get_start.is_none());
+        put_state.get_start = Some(SystemTime::now());
+        self.get_recovers.insert(
+            id,
+            WirehairDecoder::new(
+                self.fragment_size as u64 * self.inner_k as u64 * self.outer_k as u64,
+                self.fragment_size * self.inner_k,
+            ),
+        );
+        //
+    }
+
+    #[instrument(skip(self, result))]
+    fn handle_put_state(&mut self, id: usize, result: oneshot::Sender<PutState>) {
+        let _ = result.send(self.put_states[id].clone());
     }
 
     #[instrument(skip(self, message))]
@@ -711,7 +742,7 @@ impl State {
             return;
         }
         assert_ne!(index, chunk_state.local_index);
-        let task = self.chunk_store.accept_fragment(
+        let task = self.chunk_store.encode_with_fragment(
             key,
             index,
             fragment.to_vec(),

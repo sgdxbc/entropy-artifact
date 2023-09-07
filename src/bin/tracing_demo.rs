@@ -46,7 +46,7 @@ async fn client_request(path: Path<String>) -> Bytes {
                     .unwrap()
             }
             .with_current_context(),
-        )
+        );
     });
     result.1.recv().await.unwrap()
 }
