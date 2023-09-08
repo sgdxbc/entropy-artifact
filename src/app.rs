@@ -121,7 +121,21 @@ async fn upload_invite(
     }
 }
 
-#[post("/upload/query-fragment/{key}")]
+// a little bit tricky whether this should be GET or PUT
+// on the one hand the uploader's state is mutated by recording a new valid
+// chunk member, and even side effect of pushing UploadComplete will be
+// triggered
+// on the other hand other QueryFragment i.e. during downloading and repairing
+// are immutable operations and should be GET
+// this is finally decided to be GET because essentially it is a shorthand of
+// - GET /upload/query-fragment/{key} => fragment data
+// - POST /ping/{key} and uploader record the chunk member, potentially
+//   broadcast UploadComplete
+// it is uploader's internal detail that the QueryFragment also effects as a
+// Ping, and should not be exposed to the interface
+// (although the standard Ping does not go to uploader so the ration is still
+// not perfect)
+#[get("/upload/query-fragment/{key}")]
 #[instrument(skip(data))]
 async fn upload_query_fragment(
     data: Data<AppState>,
@@ -187,7 +201,7 @@ async fn repair_invite(
     HttpResponse::Ok().finish()
 }
 
-#[post("/repair/query-fragment/{key}")]
+#[get("/repair/query-fragment/{key}")]
 #[instrument(skip(data))]
 async fn repair_query_fragment(
     data: Data<AppState>,
@@ -534,7 +548,7 @@ impl State {
         spawn_local(
             async move {
                 let mut response = Client::new()
-                    .post(format!("{}/upload/query-fragment/{hex_key}", message.uri))
+                    .get(format!("{}/upload/query-fragment/{hex_key}", message.uri))
                     .trace_request()
                     .send_json(&local_member)
                     .await
@@ -656,22 +670,26 @@ impl State {
                 let key = *key;
                 let index = member.index;
                 let messages = self.messages.clone();
-                spawn_local(async move {
-                    let fragment = Client::new()
-                        .post(format!("{}/download/query-fragment/{hex_key}", peer_uri))
-                        .trace_request()
-                        .send()
-                        .await
-                        .ok()?
-                        .body()
-                        .await
-                        .ok()?;
-                    messages
-                        .upgrade()?
-                        .send(AppCommand::AcceptDownloadFragment(key, index, fragment).into())
-                        .ok()?;
-                    Some(())
-                });
+                spawn_local(
+                    async move {
+                        let mut response = Client::new()
+                            .get(format!("{}/download/query-fragment/{hex_key}", peer_uri))
+                            .trace_request()
+                            .send()
+                            .await
+                            .ok()?;
+                        if response.status() != StatusCode::OK {
+                            return None;
+                        }
+                        let fragment = response.body().await.ok()?;
+                        messages
+                            .upgrade()?
+                            .send(AppCommand::AcceptDownloadFragment(key, index, fragment).into())
+                            .ok()?;
+                        Some(())
+                    }
+                    .with_current_context(),
+                );
             }
         }
     }
@@ -708,14 +726,17 @@ impl State {
             .recover_with_fragment(key, index, fragment.to_vec());
         let messages = self.messages.clone();
         let key = *key;
-        spawn(async move {
-            let chunk = task.await?;
-            messages
-                .upgrade()?
-                .send(AppCommand::DownloadFinish(key, chunk).into())
-                .ok()?;
-            Some(())
-        });
+        spawn(
+            async move {
+                let chunk = task.await?;
+                messages
+                    .upgrade()?
+                    .send(AppCommand::DownloadFinish(key, chunk).into())
+                    .ok()?;
+                Some(())
+            }
+            .with_current_context(),
+        );
     }
 
     #[instrument(skip(self, chunk))]
@@ -788,7 +809,7 @@ impl State {
             spawn_local(
                 async move {
                     let fragment = Client::new()
-                        .post(format!(
+                        .get(format!(
                             "{}/repair/query-fragment/{hex_key}",
                             member.peer.uri
                         ))

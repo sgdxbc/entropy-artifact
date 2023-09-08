@@ -89,6 +89,7 @@ async fn main() {
                 .wrap(actix_web_opentelemetry::RequestTracing::new())
                 .configure(configure.clone())
         })
+        .workers(1)
         .bind((cli.host, 8080))
         .unwrap()
         .run();
@@ -172,6 +173,7 @@ async fn main() {
             .wrap(actix_web_opentelemetry::RequestTracing::new())
             .configure(configuration.clone())
     })
+    .workers(1)
     .listen(listener.into_std().unwrap())
     .unwrap()
     .run();
