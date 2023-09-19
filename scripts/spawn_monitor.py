@@ -19,7 +19,7 @@ async def run_peers():
         command = [
             "RUST_LOG=info",
             "RUST_BACKTRACE=1",
-            # "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://ec2-18-163-41-210.ap-east-1.compute.amazonaws.com:4317",
+            # "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://10.0.0.1:4317",
             "OTEL_SDK_DISABLED=true",
             f"{WORK_DIR}/entropy",
             HOST,
@@ -29,16 +29,16 @@ async def run_peers():
             PLAZA,
             "--num-host-peer",
             NUM_PEER,
-            "--fragment-size",
-            100,
+            # "--fragment-size",
+            # 100,
             # "--inner-k",
             # 4,
             # "--inner-n",
             # 4,
-            "--outer-k",
-            2,
-            "--outer-n",
-            2,
+            # "--outer-k",
+            # 2,
+            # "--outer-n",
+            # 2,
         ]
         if index < NUM_BENCHMARK_PEER:
             command.append("--benchmark")

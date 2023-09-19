@@ -57,7 +57,8 @@ async def put_get(peer):
 
 
 async def operation(peers):
-    await put_get(random.choice(peers))
+    # await put_get(random.choice(peers))
+    await put_get(peers[0])
 
 
 async def main():
@@ -78,7 +79,7 @@ async def main():
         for _ in done_tasks:
             if num_operation < NUM_OPERATION:
                 num_operation += 1
-                tasks.add(asyncio.create_task(operation()))
+                tasks.add(asyncio.create_task(operation(peers)))
 
 
 if __name__ == "__main__":

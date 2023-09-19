@@ -527,7 +527,7 @@ impl State {
                 .trace_request()
                 .send_json(&local_peer)
                 .await
-                .ok()?;
+                .unwrap();
             if response.status() != StatusCode::OK {
                 messages
                     .upgrade()?
@@ -555,10 +555,10 @@ impl State {
         result: oneshot::Sender<bool>,
     ) {
         let local_member = if let Some(chunk_state) = self.chunk_states.get(key) {
-            if chunk_state.fragment_present.is_cancelled() {
-                let _ = result.send(true);
-                return;
-            }
+            // if chunk_state.fragment_present.is_cancelled() {
+            //     let _ = result.send(true);
+            //     return;
+            // }
             chunk_state
                 .members
                 .iter()
@@ -599,7 +599,7 @@ impl State {
                 .trace_request()
                 .send_json(&local_member)
                 .await
-                .ok()?;
+                .unwrap();
             Some(())
         });
         let _ = result.send(true);
@@ -624,7 +624,7 @@ impl State {
                 .trace_request()
                 .send_body(fragment)
                 .await
-                .ok()?;
+                .unwrap();
             Some(())
         });
 
@@ -642,7 +642,7 @@ impl State {
                         .trace_request()
                         .send_json(&(members, peer))
                         .await
-                        .ok()?;
+                        .unwrap();
                     Some(())
                 });
             }
@@ -690,7 +690,7 @@ impl State {
                 .trace_request()
                 .send_json(&message)
                 .await
-                .ok()?;
+                .unwrap();
             Some(())
         });
     }
@@ -738,7 +738,7 @@ impl State {
                         .trace_request()
                         .send_json(&local_peer)
                         .await
-                        .ok()?;
+                        .unwrap();
                     Some(())
                 });
             }
@@ -763,7 +763,7 @@ impl State {
                 .trace_request()
                 .send_body(fragment)
                 .await
-                .ok()?;
+                .unwrap();
             Some(())
         });
     }

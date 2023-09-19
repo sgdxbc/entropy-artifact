@@ -16,8 +16,8 @@ for host in HOSTS:
         break
 SERVICE = f"http://{SERVICE_HOST}:8080"
 
-WORK_DIR = "/home/ubuntu"
-# WORK_DIR = "/local/cowsay/artifacts"
+# WORK_DIR = "/home/ubuntu"
+WORK_DIR = "/local/cowsay/artifacts"
 
 
 NUM_HOST_PEER = 200
