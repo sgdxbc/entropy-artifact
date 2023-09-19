@@ -756,9 +756,7 @@ impl State {
         let index = chunk_state.local_index;
         Self::spawn(self.local.clone(), move || async move {
             let fragment = task.with_current_context().await;
-            Client::builder()
-                .disable_timeout()
-                .finish()
+            Client::new()
                 .post(format!("{}/download/fragment/{hex_key}/{index}", peer.uri))
                 .trace_request()
                 .send_body(fragment)
