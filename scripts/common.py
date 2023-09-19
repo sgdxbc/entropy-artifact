@@ -16,11 +16,11 @@ for host in HOSTS:
         break
 SERVICE = f"http://{SERVICE_HOST}:8080"
 
-# WORK_DIR = "/home/ubuntu"
-WORK_DIR = "/local/cowsay/artifacts"
+WORK_DIR = "/home/ubuntu"
+# WORK_DIR = "/local/cowsay/artifacts"
 
 
-NUM_HOST_PEER = 200
+NUM_HOST_PEER = 100
 NUM_HOST_BENCHMARK_PEER = 1
 NUM_TOTAL_PEER = NUM_HOST_PEER * len(HOSTS)
 

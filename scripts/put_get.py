@@ -54,11 +54,12 @@ async def put_get(peer):
                     break
         latency = to_timestamp(result["get_end"]) - to_timestamp(result["get_start"])
         print(f",{peer},get,{latency}")
+        await asyncio.sleep(5)
 
 
 async def operation(peers):
-    # await put_get(random.choice(peers))
-    await put_get(peers[0])
+    await put_get(random.choice(peers))
+    # await put_get(peers[0])
 
 
 async def main():

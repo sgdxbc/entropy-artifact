@@ -53,8 +53,7 @@ module "region-1" {
     aws = aws.ap-east-1
   }
 
-  instance_type = "c5.18xlarge"
-  instance_count = 5
+  instance_count = 10
 }
 
 module "region-2" {

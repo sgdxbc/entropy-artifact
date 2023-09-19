@@ -303,6 +303,7 @@ pub struct State {
 
     messages: mpsc::WeakUnboundedSender<StateMessage>,
     local: LocalPoolHandle,
+    client_resource: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug)]
@@ -364,6 +365,7 @@ impl State {
             get_recovers: Default::default(),
             messages,
             local,
+            client_resource: Default::default(),
         }
     }
 
@@ -521,7 +523,9 @@ impl State {
         let local_peer = self.local_peer.clone();
         let messages = self.messages.clone();
         let key = *key;
+        let client_resource = self.client_resource.clone();
         Self::spawn(self.local.clone(), move || async move {
+            let _lock = client_resource.lock().await;
             let response = Client::new()
                 .post(format!("{}/upload/invite/{hex_key}/{index}", peer_uri))
                 .trace_request()
@@ -617,8 +621,10 @@ impl State {
         let task = self.chunk_store.generate_fragment(key, message.index);
         let uri = message.peer.uri.clone();
         let hex_key = hex_string(key);
+        let client_resource = self.client_resource.clone();
         Self::spawn(self.local.clone(), || async move {
             let fragment = task.with_current_context().await;
+            let _lock = client_resource.lock().await;
             Client::new()
                 .post(format!("{uri}/upload/fragment/{hex_key}"))
                 .trace_request()
@@ -636,13 +642,22 @@ impl State {
                 let hex_key = hex_key.clone();
                 let members = upload.members.clone();
                 let peer = self.local_peer.clone();
+                let client_resource = self.client_resource.clone();
                 Self::spawn(self.local.clone(), || async move {
+                    // println!("POST /upload/members/{hex_key} -> {}", member.peer.uri);
+                    // let start = std::time::Instant::now();
+                    let _lock = client_resource.lock().await;
                     Client::new()
                         .post(format!("{}/upload/members/{hex_key}", member.peer.uri))
                         .trace_request()
                         .send_json(&(members, peer))
                         .await
-                        .unwrap();
+                        .expect(&format!("{}", member.peer.uri));
+                    // println!(
+                    //     "[{:?}] POST /upload/members/{hex_key} -> {}",
+                    //     start.elapsed(),
+                    //     member.peer.uri
+                    // );
                     Some(())
                 });
             }
@@ -732,7 +747,9 @@ impl State {
                 let peer_uri = member.peer.uri.clone();
                 let hex_key = hex_string(key);
                 let local_peer = self.local_peer.clone();
+                let client_resource = self.client_resource.clone();
                 Self::spawn(self.local.clone(), move || async move {
+                    let _lock = client_resource.lock().await;
                     Client::new()
                         .get(format!("{}/download/query/{hex_key}", peer_uri))
                         .trace_request()
