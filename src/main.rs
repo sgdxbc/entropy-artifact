@@ -12,9 +12,7 @@ use tokio_util::{sync::CancellationToken, task::LocalPoolHandle};
 
 use crate::{common::hex_string, peer::Peer};
 
-// mod app;
-mod app2;
-// mod chunk;
+mod app;
 mod common;
 mod peer;
 mod plaza;
@@ -118,7 +116,7 @@ fn main() {
     } else {
         1
     });
-    let config = app2::StateConfig {
+    let config = app::StateConfig {
         fragment_size: cli.fragment_size,
         inner_k: cli.inner_k,
         inner_n: cli.inner_n,
@@ -128,12 +126,12 @@ fn main() {
         peer: peer.clone(),
         peer_secret: signing_key,
     };
-    let state = Data::new(app2::State::new(config, pool.clone(), peer_store));
+    let state = Data::new(app::State::new(config, pool.clone(), peer_store));
     let server = HttpServer::new(move || {
         let state = state.clone();
         App::new()
             .wrap(actix_web_opentelemetry::RequestTracing::new())
-            .configure(|config| app2::State::inject(config, state))
+            .configure(|config| app::State::inject(config, state))
             .app_data(PayloadConfig::new(16 << 20))
     });
     let server = if !cli.benchmark {

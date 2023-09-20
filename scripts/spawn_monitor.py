@@ -32,8 +32,8 @@ async def run_peers():
         command = [
             "RUST_LOG=info",
             "RUST_BACKTRACE=1",
-            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://10.0.0.1:4317",
-            # "OTEL_SDK_DISABLED=true",
+            # "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://10.0.0.1:4317",
+            "OTEL_SDK_DISABLED=true",
             f"{WORK_DIR}/entropy",
             HOST,
             "--port",
@@ -89,7 +89,8 @@ async def shutdown_peers():
 
 
 async def main():
-    # await prepare()
+    if HOST.endswith('compute.amazonaws.com'):
+        await prepare()
     # print("run peers")
     if await run_peers():
         exit(1)
