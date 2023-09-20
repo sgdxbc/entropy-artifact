@@ -29,10 +29,9 @@ async def ready():
 
 async def put_get(peer):
     async with aiohttp.ClientSession() as session:
-        print("commit put operation")
+        print(f"commit put operation on {peer}")
         async with session.post(f"{peer}/benchmark/put") as resp:
             put_id = await resp.json()
-        print("poll status")
         while True:
             await asyncio.sleep(1)
             async with session.get(f"{peer}/benchmark/put/{put_id}") as resp:
@@ -43,9 +42,8 @@ async def put_get(peer):
         print(f",{peer},put,{latency}")
         await asyncio.sleep(1)
 
-        print("commit get operation")
+        print(f"commit get operation on {peer}")
         await session.post(f"{peer}/benchmark/get/{put_id}")
-        print("poll status")
         while True:
             await asyncio.sleep(1)
             async with session.get(f"{peer}/benchmark/put/{put_id}") as resp:

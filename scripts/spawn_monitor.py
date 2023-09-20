@@ -6,6 +6,11 @@ from common import (
     SERVICE as PLAZA,
     NUM_HOST_PEER as NUM_PEER,
     NUM_HOST_BENCHMARK_PEER as NUM_BENCHMARK_PEER,
+    FRAGMENT_SIZE,
+    INNER_K,
+    INNER_N,
+    OUTER_K,
+    OUTER_N,
 )
 
 ARGV = dict(enumerate(sys.argv))
@@ -38,15 +43,15 @@ async def run_peers():
             "--num-host-peer",
             NUM_PEER,
             # "--fragment-size",
-            # 100,
+            # FRAGMENT_SIZE,
             # "--inner-k",
-            # 4,
+            # INNER_K,
             # "--inner-n",
-            # 4,
+            # INNER_N,
             # "--outer-k",
-            # 2,
+            # OUTER_K,
             # "--outer-n",
-            # 2,
+            # OUTER_N,
         ]
         if index < NUM_BENCHMARK_PEER:
             command.append("--benchmark")
