@@ -13,8 +13,10 @@ use actix_web::{
     web::{Bytes, Data, Json, Path, ServiceConfig},
     HttpResponse, Responder,
 };
+use actix_web_opentelemetry::ClientExt;
 use awc::Client;
 use bincode::Options;
+use opentelemetry::trace::FutureExt;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,7 +24,7 @@ use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::{sync::CancellationToken, task::LocalPoolHandle};
 use wirehair::{WirehairDecoder, WirehairEncoder};
 
-use crate::{chunk::ChunkKey, common::hex_string, peer, Peer};
+use crate::{common::hex_string, peer, ChunkKey, Peer};
 
 fn fragment_id(key: &ChunkKey, index: u32) -> [u8; 32] {
     Sha256::new()
@@ -123,6 +125,7 @@ impl State {
             .app_data(state)
             .service(benchmark_entropy)
             .service(benchmark_entropy_get)
+            .service(poll_benchmark)
             .service(entropy_upload_invite)
             .service(entropy_upload_query)
             .service(entropy_upload_push)
@@ -138,6 +141,14 @@ struct ChunkMembersMessage {
     uploader: Peer,
 }
 
+fn spawn<F: std::future::Future<Output = T> + 'static, T: Send + 'static>(
+    pool: &LocalPoolHandle,
+    create: impl FnOnce() -> F + Send + 'static,
+) -> tokio::task::JoinHandle<T> {
+    let context = opentelemetry::Context::current();
+    pool.spawn_pinned(move || create().with_context(context))
+}
+
 #[post("/benchmark/entropy")]
 async fn benchmark_entropy(data: Data<State>) -> impl Responder {
     let mut benchmarks = data.benchmarks.lock().unwrap();
@@ -149,7 +160,7 @@ async fn benchmark_entropy(data: Data<State>) -> impl Responder {
     let peer_store = data.peer_store.clone();
     let config = data.config.clone();
     let pool = data.pool.clone();
-    data.pool.spawn_pinned(move || {
+    spawn(&data.pool, move || {
         entropy_put(benchmark, upload_chunk_states, peer_store, config, pool)
     });
     Json(id)
@@ -162,8 +173,9 @@ async fn benchmark_entropy_get(data: Data<State>, index: Path<usize>) -> impl Re
     let upload_chunk_states = data.upload_chunk_states.clone();
     let config = data.config.clone();
     let pool = data.pool.clone();
-    data.pool
-        .spawn_pinned(move || entropy_get(benchmark, upload_chunk_states, config, pool));
+    spawn(&data.pool, move || {
+        entropy_get(benchmark, upload_chunk_states, config, pool)
+    });
     HttpResponse::Ok()
 }
 
@@ -206,7 +218,7 @@ async fn entropy_put(
                         cloned_pool,
                     ),
                 )| {
-                    pool.spawn_pinned(move || {
+                    spawn(&pool, move || {
                         entropy_upload_chunk(
                             benchmark,
                             upload_chunk_states,
@@ -277,12 +289,13 @@ async fn entropy_upload_chunk(
     for ((index, peer), (hex_key, message)) in
         peers.into_iter().zip(repeat((hex_key.clone(), message)))
     {
-        pool.spawn_pinned(move || async move {
+        spawn(&pool, move || async move {
             let mut response = Client::new()
                 .post(format!(
                     "{}/entropy/upload/invite/{hex_key}/{index}",
                     peer.uri
                 ))
+                .trace_request()
                 .send_body(message)
                 .await
                 .unwrap();
@@ -308,7 +321,7 @@ async fn entropy_upload_chunk(
             let encoder = encoder.clone();
             let peer = member.peer.clone();
             let config = config.clone();
-            pool.spawn_pinned(move || {
+            spawn(&pool, move || {
                 entropy_push_fragment(chunk_key, index, encoder, peer, config)
             });
         }
@@ -331,9 +344,10 @@ async fn entropy_upload_chunk(
     );
     for (member, (hex_key, message)) in members.values().zip(repeat((hex_key, message))) {
         let uri = member.peer.uri.clone();
-        pool.spawn_pinned(move || async move {
+        spawn(&pool, move || async move {
             let mut response = Client::new()
                 .post(format!("{uri}/entropy/upload/members/{hex_key}"))
+                .trace_request()
                 .send_body(message)
                 .await
                 .unwrap();
@@ -369,7 +383,11 @@ async fn entropy_push_fragment(
     encoder.encode(index, &mut fragment).unwrap();
     let hex_key = hex_string(&chunk_key);
     let mut response = Client::new()
-        .post(format!("{}/entropy/upload/push/{hex_key}", peer.uri))
+        .post(format!(
+            "{}/entropy/upload/push/{hex_key}/{index}",
+            peer.uri
+        ))
+        .trace_request()
         .send_body(fragment)
         .await
         .unwrap();
@@ -443,9 +461,10 @@ async fn entropy_upload_invite(
             proof: (),
         })
         .unwrap();
-    data.pool.spawn_pinned(move || async move {
+    spawn(&data.pool, move || async move {
         let mut response = Client::new()
             .post(format!("{}/entropy/upload/query/{chunk_key}", uploader.uri))
+            .trace_request()
             .send_body(message)
             .await
             .unwrap();
@@ -471,7 +490,7 @@ async fn entropy_upload_push(
         .has_fragment
         .clone();
     let config = data.config.clone();
-    data.pool.spawn_pinned(move || async move {
+    spawn(&data.pool, move || async move {
         tokio::fs::create_dir(config.chunk_path.join(&chunk_key))
             .await
             .unwrap();
@@ -501,7 +520,7 @@ async fn entropy_upload_members(
 
     let has_fragment = chunk_state.has_fragment.clone();
     let index = chunk_state.index;
-    data.pool.spawn_pinned(move || async move {
+    spawn(&data.pool, move || async move {
         has_fragment.cancelled().await;
         // TODO spawn check repair task
         let mut response = Client::new()
@@ -509,6 +528,7 @@ async fn entropy_upload_members(
                 "{}/entropy/upload/up/{chunk_key}/{index}",
                 message.uploader.uri,
             ))
+            .trace_request()
             .send_body(Bytes::default()) // TODO signature
             .await
             .unwrap();
@@ -539,7 +559,7 @@ async fn entropy_get(
                 .iter()
                 .zip(repeat((upload_chunk_states, config.clone(), pool.clone())))
                 .map(|(&chunk_key, (upload_chunk_states, config, cloned_pool))| {
-                    pool.spawn_pinned(move || {
+                    spawn(&pool, move || {
                         entropy_download_chunk(chunk_key, upload_chunk_states, config, cloned_pool)
                     })
                 }),
@@ -583,12 +603,13 @@ async fn entropy_download_chunk(
             .into_values()
             .zip(repeat(hex_string(&chunk_key)))
             .map(|(member, hex_key)| {
-                pool.spawn_pinned(move || async move {
+                spawn(&pool, move || async move {
                     let mut response = Client::new()
                         .get(format!(
                             "{}/entropy/download/pull/{hex_key}/{}",
                             member.peer.uri, member.index
                         ))
+                        .trace_request()
                         .send()
                         .await
                         .unwrap();
@@ -598,7 +619,7 @@ async fn entropy_download_chunk(
                         "{:?}",
                         response.body().await
                     );
-                    (member.index, response.body().await.unwrap())
+                    (member.index, response.body().limit(16 << 20).await.unwrap())
                 })
             }),
     );
