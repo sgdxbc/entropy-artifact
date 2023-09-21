@@ -45,10 +45,11 @@ struct Cli {
     outer_n: u32,
 }
 
-static CLIENT: std::sync::OnceLock<reqwest_middleware::ClientWithMiddleware> =
-    std::sync::OnceLock::new();
-fn client() -> &'static reqwest_middleware::ClientWithMiddleware {
-    CLIENT.get().unwrap()
+fn with_client<T>(f: impl FnOnce(&awc::Client) -> T) -> T {
+    thread_local! {
+        static CLIENT: awc::Client = awc::Client::builder().connector(awc::Connector::new().limit(0)).finish();
+    }
+    CLIENT.with(f)
 }
 
 fn main() {
@@ -90,20 +91,20 @@ fn main() {
         return;
     }
 
-    CLIENT
-        .set(
-            reqwest_middleware::ClientBuilder::new(
-                reqwest::Client::builder()
-                    .timeout(Duration::from_secs(3))
-                    .build()
-                    .unwrap(),
-            )
-            .with(reqwest_tracing::TracingMiddleware::<
-                reqwest_tracing::SpanBackendWithUrl,
-            >::new())
-            .build(),
-        )
-        .unwrap();
+    // CLIENT
+    //     .set(
+    //         reqwest_middleware::ClientBuilder::new(
+    //             reqwest::Client::builder()
+    //                 .timeout(Duration::from_secs(3))
+    //                 .build()
+    //                 .unwrap(),
+    //         )
+    //         .with(reqwest_tracing::TracingMiddleware::<
+    //             reqwest_tracing::SpanBackendWithUrl,
+    //         >::new())
+    //         .build(),
+    //     )
+    //     .unwrap();
 
     let port = cli.port.unwrap();
     let uri = format!("http://{}:{port}", cli.host);
@@ -205,19 +206,21 @@ fn main() {
 }
 
 async fn plaza_session(plaza: String, shutdown: CancellationToken) {
-    let response = client().post(format!("{plaza}/join")).send().await.unwrap();
+    let mut response = with_client(|client| client.post(format!("{plaza}/join")))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(
         response.status(),
         StatusCode::OK,
         "{:?}",
-        response.bytes().await
+        response.body().await
     );
 
     loop {
         sleep(Duration::from_secs(1)).await;
         let global_shutdown = async {
-            let response = client()
-                .get(format!("{plaza}/shutdown"))
+            let mut response = with_client(|client| client.get(format!("{plaza}/shutdown")))
                 .send()
                 .await
                 .unwrap();
@@ -225,7 +228,7 @@ async fn plaza_session(plaza: String, shutdown: CancellationToken) {
                 response.status(),
                 StatusCode::OK,
                 "{:?}",
-                response.bytes().await
+                response.body().await
             );
             response.json::<bool>().await.unwrap()
         };
@@ -240,8 +243,7 @@ async fn plaza_session(plaza: String, shutdown: CancellationToken) {
         }
     }
 
-    let response = client()
-        .post(format!("{plaza}/leave"))
+    let mut response = with_client(|client| client.post(format!("{plaza}/leave")))
         .send()
         .await
         .unwrap();
@@ -249,7 +251,7 @@ async fn plaza_session(plaza: String, shutdown: CancellationToken) {
         response.status(),
         StatusCode::OK,
         "{:?}",
-        response.bytes().await
+        response.body().await
     );
     // println!("{} leaved", peer.uri);
 }
